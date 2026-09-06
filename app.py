@@ -1,7 +1,4 @@
-"""
-Streamlit Web 界面 - AI Agent 产品全链路实战
-保留 p1 MCP Server、p4 科研文献整合和 p6 视频知识管道
-"""
+"""P4: 科研文献整合与论文初稿辅助。"""
 import json
 import streamlit as st
 import pandas as pd
@@ -50,8 +47,8 @@ except ImportError as e:
 # 页面配置
 # ============================================================
 st.set_page_config(
-    page_title="AI Agent 产品集",
-    page_icon="🤖",
+    page_title="科研文献整合助手",
+    page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -64,73 +61,23 @@ def clean_ansi(text: str) -> str:
     return ansi_escape.sub('', text)
 
 # ============================================================
-# 侧边栏导航
+# P4 单项目入口
 # ============================================================
-st.sidebar.title("🤖 AI Agent 产品集")
+st.sidebar.title("📚 科研文献整合助手")
 st.sidebar.markdown("---")
-project = st.sidebar.radio(
-    "选择项目",
-    ["🏠 总览", "🔌 p1 MCP Server", "✍️ p4 科研文献整合", "🎬 p6 视频管道"]
-)
+st.sidebar.caption("面向科研新手的多文献整合与结构化写作辅助")
+st.sidebar.caption("支持 PDF、Word、TXT、Markdown、JSON、CSV")
 st.sidebar.markdown("---")
 st.sidebar.caption(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-st.sidebar.caption("🤖 AI Agent 产品集 · v1.0")
+st.sidebar.caption("P4 Literature Assistant · v1.0")
+project = "p4"
 
 # ============================================================
 # 页面内容
 # ============================================================
 
-# ---------- 总览 ----------
-if project == "🏠 总览":
-    st.title("🤖 AI Agent 产品作品集")
-    st.markdown(
-        """
-        > **3 个项目**覆盖知识库接入、科研文献整合和视频知识结构化场景。
-        """
-    )
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("🔌 p1 MCP Server", "✅ 已接入", "3 个工具")
-    with col2:
-        st.metric("✍️ p4 文献整合", "4 Agents", "论文来源可追溯")
-    with col3:
-        st.metric("🎬 p6 视频管道", "5 步流程", "支持真实模式")
-    st.markdown("---")
-    st.subheader("📌 快速体验")
-    st.caption("点击左侧项目查看详情")
-
-# ---------- p1 MCP Server ----------
-elif project == "🔌 p1 MCP Server":
-    st.header("🔌 MCP 协议服务端")
-    st.markdown(
-        """
-        **Model Context Protocol (MCP)** 是 Anthropic 推出的标准化 AI 工具调用协议。
-        我实现了 3 个工具，将 Obsidian 本地知识库接入 Codex。
-        """
-    )
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.success("`search_notes`")
-        st.caption("按关键词搜索笔记")
-    with col2:
-        st.success("`get_daily_note`")
-        st.caption("获取指定日期日记")
-    with col3:
-        st.success("`list_recent_notes`")
-        st.caption("列出近期修改笔记")
-    st.code(
-        """
-        # 在 Codex 中调用的示例
-        用户: 搜索笔记里关于 RAG 的内容
-        → Codex 自动调用 search_notes("RAG")
-        → 返回 test-note.md 中包含 RAG 的段落
-        """,
-        language="markdown"
-    )
-    st.caption("✅ 已成功接入 Codex，端到端验证通过")
-
 # ---------- p4 科研文献整合 ----------
-elif project == "✍️ p4 科研文献整合":
+if project == "p4":
     st.header("✍️ 科研文献整合与论文初稿辅助")
     st.caption("面向科研新手：把已找到的多篇论文整理成可比较、可追溯的综述初稿")
 
