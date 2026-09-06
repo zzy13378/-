@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+uploads/
+exports/
+temp/
+tmp/
+*.log
+articles/
+knowledge_output/
+videos/
+vendor/
+*.mp4
+*.wav
+*.log
