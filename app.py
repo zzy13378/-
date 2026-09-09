@@ -37,6 +37,8 @@ try:
         llm as P4_LLM,
         deduplicate_papers,
         load_papers_from_bytes,
+        STRUCTURED_FIELD_LABELS,
+        WRITING_SKILL_CATALOG,
     )
     HAS_WRITER = True
 except ImportError as e:
@@ -204,9 +206,112 @@ if project == "p4":
                             if len(warnings) > 12:
                                 st.caption(f"其余 {len(warnings) - 12} 条提示与上述内容相同或属于同类书目信息提醒。")
 
-            tab_theme, tab_matrix, tab_gap, tab_article, tab_review = st.tabs(
-                ["主题整合", "文献比较矩阵", "研究空白", "论文初稿", "评审与迭代"]
+            tab_structured, tab_skills, tab_theme, tab_matrix, tab_gap, tab_article, tab_review = st.tabs(
+                ["文献结构化提取", "写作 Skill 工作台", "主题整合", "文献比较矩阵", "研究空白", "论文初稿", "评审与迭代"]
             )
+            with tab_structured:
+                structured_papers = research.get("structured_papers", [])
+                if structured_papers:
+                    st.caption(
+                        f"已按统一字段整理 {len(structured_papers)} 篇论文；字段覆盖率 "
+                        f"{research.get('structured_field_coverage', 0):.0%}。未在原文找到的内容会标记为待核验。"
+                    )
+                    for index, item in enumerate(structured_papers):
+                        metadata = item.get("metadata", {})
+                        with st.expander(
+                            f"[{item.get('paper_id', f'R{index + 1}')}] {item.get('title', '未命名论文')}",
+                            expanded=index == 0,
+                        ):
+                            st.caption(
+                                f"作者：{', '.join(metadata.get('authors', [])) or '未知'}｜"
+                                f"年份：{metadata.get('year') or '未知'}｜"
+                                f"DOI：{metadata.get('doi') or '未识别'}｜"
+                                f"文本状态：{metadata.get('text_quality', '未知')}｜"
+                                f"字段：{item.get('field_count', 0)}/9"
+                            )
+                            fields = item.get("fields", {})
+                            sources = item.get("field_sources", {})
+                            for field_key, field_label in STRUCTURED_FIELD_LABELS.items():
+                                st.markdown(f"**{field_label}** · {sources.get(field_key, '未提取')}")
+                                st.write(fields.get(field_key, "原文未明确说明。"))
+                            if item.get("warnings"):
+                                st.warning("；".join(item["warnings"]))
+                else:
+                    st.info("暂无结构化提取结果，请先上传论文并开始文献整合。")
+            with tab_skills:
+                writing_skills = result.get("writing_skills", {})
+                st.markdown("### 本次流程使用的 4 个写作 Skill")
+                st.caption("Skill 不是单独的聊天按钮，而是嵌入文献整理与论文初稿流程的具体能力模块。")
+                for skill in writing_skills.get("catalog", WRITING_SKILL_CATALOG):
+                    with st.expander(f"{skill.get('name', '未命名 Skill')} · {skill.get('purpose', '')}", expanded=True):
+                        st.markdown(f"**输入：** {skill.get('input', '')}")
+                        st.markdown(f"**输出：** {skill.get('output', '')}")
+
+                binding = writing_skills.get("claim_evidence", {})
+                st.markdown("### 1. 论点-证据绑定结果")
+                st.caption(
+                    f"共生成 {len(binding.get('cards', []))} 张论点卡片；"
+                    f"已支持 {binding.get('supported_count', 0)} 张，"
+                    f"覆盖率 {binding.get('coverage', 0):.0%}。"
+                )
+                binding_rows = [
+                    {
+                        "论文": card.get("paper_id", ""),
+                        "字段": card.get("field_label", ""),
+                        "论点": card.get("claim", ""),
+                        "证据状态": card.get("verification_status", ""),
+                        "来源": card.get("source_status", ""),
+                        "使用建议": card.get("writing_guidance", ""),
+                    }
+                    for card in binding.get("cards", [])
+                ]
+                if binding_rows:
+                    st.dataframe(pd.DataFrame(binding_rows), width="stretch", hide_index=True)
+                else:
+                    st.info("暂无可绑定的论点与证据。")
+
+                synthesis = writing_skills.get("cross_paper_synthesis", {})
+                st.markdown("### 2. 跨文献综合写作结果")
+                for item in synthesis.get("syntheses", []):
+                    st.markdown(f"**{item.get('id', '')}｜{item.get('theme', '相关研究')}**")
+                    st.write(item.get("paragraph", ""))
+                    st.caption(f"涉及来源：{', '.join(item.get('paper_ids', []))}；{item.get('writing_advice', '')}")
+                if not synthesis.get("syntheses"):
+                    st.info("暂无同主题文献综合段落。")
+
+                structure = writing_skills.get("section_argument_structure", {})
+                st.markdown("### 3. 章节论证结构")
+                for plan in structure.get("plans", []):
+                    with st.expander(plan.get("section", "未命名章节"), expanded=False):
+                        st.markdown(f"**章节目标：** {plan.get('goal', '')}")
+                        st.markdown(f"**中心论点：** {plan.get('core_claim', '')}")
+                        st.markdown("**写作步骤：**")
+                        for step in plan.get("writing_steps", []):
+                            st.write(f"- {step}")
+                        st.markdown(f"**过渡句建议：** {plan.get('transition', '')}")
+                        evidence_order = plan.get("evidence_order", [])
+                        if evidence_order:
+                            st.caption("建议证据顺序：" + " → ".join(item.get("paper_id", "") for item in evidence_order))
+
+                logic = writing_skills.get("logic_coherence_review", {})
+                st.markdown("### 4. 逻辑与衔接评审")
+                st.metric("逻辑评审分", f"{logic.get('score', 0)}/10")
+                st.write(f"**评审结论：** {logic.get('verdict', '待评审')}")
+                for strength in logic.get("strengths", []):
+                    st.success(strength)
+                logic_rows = [
+                    {
+                        "等级": issue.get("level", ""),
+                        "章节": issue.get("section", ""),
+                        "问题": issue.get("issue", ""),
+                        "修改建议": issue.get("suggestion", ""),
+                    }
+                    for issue in logic.get("issues", [])
+                ]
+                if logic_rows:
+                    st.dataframe(pd.DataFrame(logic_rows), width="stretch", hide_index=True)
+                else:
+                    st.success("暂未发现明显的逻辑、引用或章节衔接问题。")
             with tab_theme:
                 themes = research.get("themes", [])
                 if themes:

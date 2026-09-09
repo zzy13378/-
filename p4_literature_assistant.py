@@ -857,8 +857,93 @@ def _split_sentences(text: str) -> List[str]:
     return [_clean_evidence_text(value, 900) for value in values if len(_clean_evidence_text(value, 900)) >= 12]
 
 
+_DOCUMENT_SECTION_LABELS = (
+    r"摘要|内容摘要|关键词|引言|绪论|研究背景|背景|研究问题|研究目标|研究目的|目的|文献综述|理论基础|理论框架|理论依据|理论模型|"
+    r"研究方法|方法|数据来源|研究数据|数据集|样本|资料来源|研究设计|实验设计|实验设置|研究流程|实验过程|"
+    r"研究结果|结果|发现|结论|局限性|局限|不足|限制|讨论|展望|参考文献|References?|Bibliography"
+)
+
+
+def _match_section_heading(line: str, labels: str = _DOCUMENT_SECTION_LABELS) -> Optional[re.Match[str]]:
+    """Match a real section heading, not a sentence that merely starts with a label."""
+    numbered = re.match(
+        rf"^\s*\d+(?:\.\d+)*[.)、]?\s*(?:{labels})\s*(?:[:：]\s*(.*))?\s*$",
+        line or "",
+        flags=re.I,
+    )
+    if numbered:
+        return numbered
+    labeled = re.match(rf"^\s*(?:{labels})\s*[:：]\s*(.*?)\s*$", line or "", flags=re.I)
+    if labeled:
+        return labeled
+    return re.fullmatch(rf"\s*(?:{labels})\s*", line or "", flags=re.I)
+
+
+def _body_without_references(text: str) -> str:
+    """Remove the bibliography before semantic extraction to avoid false evidence."""
+    value = text or ""
+    match = re.search(
+        rf"(?im)^\s*(?:\d+(?:\.\d+)*[.)、]?\s*)?(?:参考文献|References?|Bibliography)\s*[:：]?\s*$",
+        value,
+    )
+    return value[:match.start()] if match else value
+
+
+def _section_block(text: str, labels: str, limit: int = 1200) -> str:
+    """Extract a labelled section until the next meaningful section heading."""
+    body = _body_without_references(text)
+    lines = body.splitlines()
+    target_pattern = re.compile(
+        rf"^\s*\d+(?:\.\d+)*[.)、]?\s*(?:{labels})\s*(?:[:：]\s*(.*))?\s*$",
+        flags=re.I,
+    )
+    target_inline_pattern = re.compile(rf"^\s*(?:{labels})\s*[:：]\s*(.*?)\s*$", flags=re.I)
+    target_bare_pattern = re.compile(rf"^\s*(?:{labels})\s*$", flags=re.I)
+    start = None
+    collected: List[str] = []
+    for index, line in enumerate(lines):
+        match = target_pattern.match(line) or target_inline_pattern.match(line) or target_bare_pattern.match(line)
+        if match:
+            start = index
+            inline = match.group(1) if match.lastindex else ""
+            if inline:
+                collected.append(inline)
+            break
+    if start is None:
+        return ""
+    for line in lines[start + 1:]:
+        if _match_section_heading(line):
+            break
+        if line.strip():
+            collected.append(line.strip())
+        if len(" ".join(collected)) >= limit:
+            break
+    return _clean_evidence_text(" ".join(collected), limit)
+
+
+def _abstract_context(abstract: str, limit: int = 1400) -> str:
+    """Use the opening context of an abstract when it lacks an explicit background label."""
+    sentences = _split_sentences(abstract)
+    if not sentences:
+        return ""
+    context = [
+        sentence for sentence in sentences[:5]
+        if not re.search(r"方法|采用|基于|结果|发现|结论|数据|样本|Methods?|Results?|Conclusion", sentence, flags=re.I)
+    ]
+    return _clean_evidence_text(" ".join(context[:2] or sentences[:2]), limit)
+
+
 def _label_segment(text: str, labels: str, limit: int = 900) -> str:
-    next_labels = r"目的|研究目的|方法|研究方法|结果|研究结果|发现|结论|局限|不足|限制|关键词|引言|背景|Objective|Methods?|Results?|Findings?|Conclusion|Limitations?"
+    section = _section_block(text, labels, limit)
+    if section:
+        return section
+    next_labels = (
+        r"目的|研究目的|研究问题|研究目标|方法|研究方法|理论基础|理论框架|理论依据|理论模型|"
+        r"数据来源|研究数据|数据集|样本|资料来源|研究设计|实验设计|实验设置|研究流程|实验过程|"
+        r"结果|研究结果|发现|结论|局限性|局限|不足|限制|关键词|引言|背景|"
+        r"Objective|Methods?|Theoretical framework|Conceptual framework|Data source|Dataset|Sample|"
+        r"Study design|Research design|Results?|Findings?|Conclusion|Limitations?"
+    )
     boundary = rf"(?=\s*(?:【?(?:{next_labels})】?\s*[:：]?|$))"
     bracket = re.search(rf"(?:【\s*(?:{labels})\s*】|\[\s*(?:{labels})\s*\])\s*[:：]?\s*(.+?){boundary}", text, flags=re.I | re.S)
     if bracket:
@@ -975,7 +1060,8 @@ def _research_signals(paper: Paper) -> Dict[str, Any]:
     """Extract grounded signals from the uploaded paper for rules and prompts."""
     abstract = _clean_evidence_text(paper.abstract, 2200)
     full_evidence = _paper_evidence_text(paper, 100000)
-    evidence = full_evidence
+    document_text = _body_without_references(paper.full_text or "")
+    evidence = _clean_evidence_text(document_text, 100000) or full_evidence
     if paper.text_quality == "仅书目信息" or (
         not abstract and len(re.sub(r"\s+", "", paper.full_text)) < 300
     ):
@@ -988,23 +1074,23 @@ def _research_signals(paper: Paper) -> Dict[str, Any]:
             "domain": "待确认的研究主题",
         }
     abstract_search = re.sub(r"\s+", "", abstract)
-    question = _label_segment(abstract, r"目的|研究目的|Objective")
+    question = _label_segment(abstract, r"目的|研究目的|研究问题|研究目标|Objective")
     question = question or _first_signal_sentence(abstract, (r"以.+为研究", r"围绕.+展开", r"探究", r"分析", r"评估", r"识别", r"预测", r"如何界定"), 1000)
-    question = question or _label_segment(full_evidence, r"目的|研究目的|Objective")
+    question = question or _label_segment(document_text, r"目的|研究目的|研究问题|研究目标|Objective")
     question = question or _first_signal_sentence(
-        full_evidence,
+        evidence,
         (r"本研究(?:以|围绕|旨在)", r"this study (?:aims|investigates|examines|proposes)", r"we investigate"),
         1000,
     )
-    method = _document_method(paper, full_evidence, abstract)
+    method = _document_method(paper, document_text, abstract)
     finding = _label_segment(abstract, r"结果|研究结果|发现|结论|Results?|Findings?|Conclusion")
     finding = finding or _signal_block(abstract, (r"结果表明", r"结果发现", r"研究发现", r"结果显示", r"NDCG", r"价值指数", r"五大主题", r"两大板块", r"达成共识"), 5, 1400)
     if not finding:
         finding = _first_signal_sentence(abstract, (r"表明", r"发现"), 1100)
-    finding = finding or _label_segment(full_evidence, r"结果|研究结果|发现|结论|Results?|Findings?|Conclusion", 1400)
-    finding = finding or _first_signal_sentence(full_evidence, (r"结果表明", r"研究发现", r"结果显示", r"NDCG", r"价值指数", r"达成共识", r"we find", r"our results"), 1100)
+    finding = finding or _label_segment(document_text, r"结果|研究结果|发现|结论|Results?|Findings?|Conclusion", 1400)
+    finding = finding or _first_signal_sentence(evidence, (r"结果表明", r"研究发现", r"结果显示", r"NDCG", r"价值指数", r"达成共识", r"we find", r"our results"), 1100)
     limitation = _label_segment(abstract, r"局限|不足|限制|Limitations?")
-    limitation = limitation or _document_limitation(full_evidence)
+    limitation = limitation or _document_limitation(evidence)
     limitation = limitation or _first_signal_sentence(abstract, (r"局限", r"不足", r"未考虑", r"仍需", r"缺乏", r"有待"), 900)
     if not limitation:
         limitation = "摘要未明确陈述局限，需结合全文的样本、指标和适用范围进一步核验。"
@@ -1272,6 +1358,569 @@ class LLMClient:
 llm = LLMClient()
 
 
+STRUCTURED_FIELD_LABELS = {
+    "background": "研究背景",
+    "research_question": "研究问题",
+    "theory": "理论基础/分析框架",
+    "method": "研究方法",
+    "data_source": "数据来源",
+    "design": "研究设计",
+    "finding": "核心结论",
+    "limitation": "研究局限",
+    "reusable_insight": "可借鉴内容",
+}
+
+
+class LiteratureStructuringSkill:
+    """将单篇论文整理为统一、可比较、可追溯的研究卡片。"""
+
+    def extract(self, paper: Paper) -> Dict[str, Any]:
+        document_text = _body_without_references(paper.full_text or "")
+        evidence = _clean_evidence_text(document_text, 100000) or _paper_evidence_text(paper, 100000)
+        signals = _research_signals(paper)
+        metadata_only = paper.text_quality == "仅书目信息" or (
+            not paper.abstract and len(re.sub(r"\s+", "", paper.full_text)) < 300
+        )
+        if metadata_only:
+            unavailable = "当前文件只有书目信息，无法从原文可靠提取该字段。"
+            fields = {key: unavailable for key in STRUCTURED_FIELD_LABELS}
+            fields.update({
+                "research_question": signals["research_question"],
+                "method": signals["method"],
+                "finding": signals["finding"],
+                "limitation": signals["limitation"],
+                "reusable_insight": "需要上传论文摘要或正文后，再提炼可借鉴的方法、指标和研究结论。",
+            })
+        else:
+            fields = {
+                "background": self._background(paper, document_text, evidence),
+                "research_question": signals["research_question"],
+                "theory": self._theory(document_text, evidence),
+                "method": signals["method"],
+                "data_source": self._data_source(document_text, evidence),
+                "design": self._design(document_text, evidence),
+                "finding": signals["finding"],
+                "limitation": signals["limitation"],
+                "reusable_insight": self._reusable_insight(signals),
+            }
+        fields = {key: compact_text(value, 1800) for key, value in fields.items()}
+        available = [
+            key for key, value in fields.items()
+            if _skill_text_is_usable(value)
+        ]
+        return {
+            "paper_id": paper.ref_id,
+            "title": paper.title,
+            "fields": fields,
+            "field_sources": {key: self._source_for(value, paper, evidence) for key, value in fields.items()},
+            "metadata": {
+                "authors": paper.authors,
+                "year": paper.year,
+                "doi": paper.doi,
+                "url": paper.url,
+                "source": paper.source,
+                "page_count": paper.page_count,
+                "text_quality": paper.text_quality,
+                "metadata_confidence": paper.metadata_confidence,
+            },
+            "available_fields": available,
+            "field_count": len(available),
+            "field_coverage": round(len(available) / len(STRUCTURED_FIELD_LABELS), 2),
+            "warnings": list(paper.parse_warnings),
+        }
+
+    def extract_all(self, papers: Iterable[Paper]) -> List[Dict[str, Any]]:
+        return [self.extract(paper) for paper in papers]
+
+    @staticmethod
+    def _background(paper: Paper, document_text: str, evidence: str) -> str:
+        value = _label_segment(paper.abstract, r"背景|研究背景|引言|Introduction|Background", 1400)
+        value = value or _label_segment(document_text, r"背景|研究背景|引言|Introduction|Background", 1400)
+        value = value or _first_signal_sentence(
+            paper.abstract or evidence,
+            (r"随着", r"目前", r"现有研究", r"近年来", r"背景", r"this study addresses", r"existing research"),
+            1400,
+        )
+        return value or _abstract_context(paper.abstract) or "原文未明确单独标注研究背景，需结合引言部分核验。"
+
+    @staticmethod
+    def _theory(document_text: str, evidence: str) -> str:
+        value = _label_segment(
+            document_text,
+            r"理论基础|理论框架|理论依据|理论模型|理论|Theory|Theoretical framework|Conceptual framework",
+            1400,
+        )
+        value = value or _first_signal_sentence(
+            evidence,
+            (r"基于.+理论", r"依据.+理论", r"理论框架", r"theoretical framework", r"conceptual framework"),
+            1400,
+        )
+        if value:
+            return value
+        # Some empirical papers do not name a formal theory but do expose a
+        # stable conceptual/analytical framework. Keep that distinction visible
+        # instead of leaving a useful field empty or borrowing a reference title.
+        if "生态系统文化服务" in evidence or "SolVES" in evidence:
+            return "分析框架：围绕生态系统文化服务类型识别、空间分布或社会价值评估及影响因素分析展开；论文未单独标出形式化理论名称。"
+        if "专利数据" in evidence or "知识图谱" in evidence or "KGAT" in evidence:
+            return "分析框架：以专利主题识别、技术—应用场景知识图谱构建和匹配度预测为核心；论文未单独标出形式化理论名称。"
+        if "学术出版" in evidence or "人工智能政策" in evidence or "学术伦理" in evidence:
+            return "分析框架：围绕学术出版机构人工智能政策、使用规范与治理要求进行主题分析；论文未单独标出形式化理论名称。"
+        return "原文未明确说明理论基础，需结合理论框架或文献综述部分核验。"
+
+    @staticmethod
+    def _data_source(document_text: str, evidence: str) -> str:
+        value = _label_segment(document_text, r"数据来源|研究数据|数据集|样本|资料来源|Data source|Dataset|Data|Sample", 1400)
+        value = value or _first_signal_sentence(
+            evidence,
+            (r"数据来源", r"研究数据", r"选取.+样本", r"以.+为数据", r"基于.+数据", r"we collected", r"dataset", r"sample"),
+            1400,
+        )
+        return value or "原文未明确说明数据来源或样本，需结合数据与样本章节核验。"
+
+    @staticmethod
+    def _design(document_text: str, evidence: str) -> str:
+        value = _label_segment(document_text, r"研究设计|实验设计|实验设置|研究流程|实验过程|Experimental setup|Study design|Research design", 1400)
+        value = value or _signal_block(
+            evidence,
+            (r"实验设置", r"实验设计", r"研究设计", r"对照实验", r"分为", r"首先.+然后", r"we conducted", r"experimental setup"),
+            4,
+            1400,
+        )
+        return value or "原文未明确说明研究设计，需结合方法、实验或分析流程部分核验。"
+
+    @staticmethod
+    def _reusable_insight(signals: Dict[str, Any]) -> str:
+        parts = []
+        for label, key in (("方法", "method"), ("结论", "finding"), ("使用边界", "limitation")):
+            value = signals.get(key, "")
+            if value and "未明确" not in value:
+                parts.append(f"{label}：{value}")
+        return "；".join(parts) if parts else "原文可用信息不足，暂不能提炼可直接借鉴的方法或结论。"
+
+    @staticmethod
+    def _source_for(value: str, paper: Paper, evidence: str) -> str:
+        if not value:
+            return "未提取"
+        if "书目信息" in value:
+            return "书目信息限制"
+        if "原文未明确" in value or "需结合" in value or "待全文核验" in value:
+            return "待全文核验"
+        if paper.abstract and value in paper.abstract:
+            return "摘要"
+        if value in evidence:
+            return "正文/摘要"
+        return "基于已提取文本归纳"
+
+
+WRITING_SKILL_CATALOG = [
+    {
+        "key": "claim_evidence",
+        "name": "论点-证据绑定 Skill",
+        "purpose": "把可用于写作的论点绑定到论文中的结构化证据，避免无依据生成。",
+        "input": "论文结构化字段、摘要与正文来源状态",
+        "output": "论点、证据摘录、论文编号、来源状态与使用建议",
+    },
+    {
+        "key": "cross_paper_synthesis",
+        "name": "跨文献综合写作 Skill",
+        "purpose": "按研究问题、方法、结论和适用边界横向整合文献，避免逐篇罗列。",
+        "input": "主题分组与文献比较矩阵",
+        "output": "带来源编号的综合段落、比较维度与写作建议",
+    },
+    {
+        "key": "section_argument_structure",
+        "name": "章节论证结构 Skill",
+        "purpose": "为每个章节明确写作目标、中心论点、证据顺序和过渡逻辑。",
+        "input": "论文大纲、综合段落与论点-证据卡片",
+        "output": "章节写作蓝图与优先引用的论文证据",
+    },
+    {
+        "key": "logic_coherence_review",
+        "name": "逻辑与衔接评审 Skill",
+        "purpose": "检查初稿中的引用缺失、强结论、重复表达和章节衔接问题。",
+        "input": "初稿、章节蓝图与有效论文编号",
+        "output": "问题等级、定位章节、修改建议与逻辑评审分",
+    },
+]
+
+
+def _skill_text_is_usable(value: Any) -> bool:
+    text = compact_text(value, 200)
+    return bool(text) and not any(marker in text for marker in (
+        "无法从原文可靠提取", "原文未明确", "未提供摘要或正文", "正文未提供", "信息不足", "需结合", "待全文核验",
+    ))
+
+
+class ClaimEvidenceBindingSkill:
+    name = "论点-证据绑定 Skill"
+    fields = ("research_question", "method", "finding", "limitation")
+
+    def run(self, structured_papers: List[Dict[str, Any]]) -> Dict[str, Any]:
+        cards: List[Dict[str, str]] = []
+        for paper in structured_papers:
+            fields = paper.get("fields", {})
+            field_sources = paper.get("field_sources", {})
+            for field in self.fields:
+                evidence = compact_text(fields.get(field), 1000)
+                source_status = field_sources.get(field, "未提取")
+                if not evidence:
+                    continue
+                if source_status in {"摘要", "正文/摘要"} and _skill_text_is_usable(evidence):
+                    status = "已支持"
+                elif source_status == "基于已提取文本归纳" and _skill_text_is_usable(evidence):
+                    status = "建议核验"
+                else:
+                    status = "待核验"
+                label = STRUCTURED_FIELD_LABELS[field]
+                cards.append({
+                    "paper_id": paper.get("paper_id", ""),
+                    "title": paper.get("title", "未命名论文"),
+                    "field": field,
+                    "field_label": label,
+                    "claim": f"{label}：{evidence}",
+                    "evidence": evidence,
+                    "source_status": source_status,
+                    "verification_status": status,
+                    "writing_guidance": self._guidance(field, status),
+                })
+        supported = sum(card["verification_status"] == "已支持" for card in cards)
+        return {
+            "name": self.name,
+            "cards": cards,
+            "supported_count": supported,
+            "verification_count": len(cards) - supported,
+            "coverage": round(supported / len(cards), 2) if cards else 0,
+        }
+
+    @staticmethod
+    def _guidance(field: str, status: str) -> str:
+        if status == "待核验":
+            return "不能作为确定性论文事实使用；补充全文证据或改为待核验表述。"
+        if field == "finding":
+            return "可用于结果比较或综述结论，需保留对应论文编号。"
+        if field == "limitation":
+            return "可用于研究不足章节，避免扩大为领域普遍结论。"
+        if field == "method":
+            return "可用于方法比较，需同时说明数据、样本或适用场景。"
+        return "可作为章节论点的证据基础，写作时保留论文编号。"
+
+
+class CrossPaperSynthesisSkill:
+    name = "跨文献综合写作 Skill"
+
+    def run(self, themes: List[Dict[str, Any]], comparisons: List[Dict[str, Any]]) -> Dict[str, Any]:
+        comparison_by_id = {item.get("paper_id", ""): item for item in comparisons}
+        syntheses = []
+        for index, theme in enumerate(themes, 1):
+            paper_ids = [paper_id for paper_id in theme.get("paper_ids", []) if paper_id in comparison_by_id]
+            if not paper_ids:
+                continue
+            rows = [comparison_by_id[paper_id] for paper_id in paper_ids]
+            methods = self._dimension(rows, "method")
+            findings = self._dimension(rows, "finding")
+            boundaries = self._dimension(rows, "limitation")
+            questions = self._dimension(rows, "research_question")
+            citations = "".join(f"[{paper_id}]" for paper_id in paper_ids)
+            theme_name = theme.get("name", "相关研究")
+            if len(rows) == 1:
+                paragraph = (
+                    f"围绕“{theme_name}”，目前仅有{paper_ids[0]}提供直接材料。"
+                    f"该研究关注{questions or '具体研究问题'}，采用{methods or '原文待核验的方法'}，"
+                    f"其结论为{findings or '原文未明确说明'}。由于缺少同主题的直接比较，"
+                    f"该结论应限定在该研究的样本与场景中理解。{citations}"
+                )
+                advice = "将其作为独立研究线索呈现，不要写成同领域的普遍结论。"
+            else:
+                paragraph = (
+                    f"在“{theme_name}”主题下，现有研究围绕{questions or '相近但不完全相同的问题'}展开。"
+                    f"方法上呈现出{methods or '原文方法信息不足'}等差异；"
+                    f"结论上可归纳出{findings or '需补充原文结果证据'}。"
+                    f"不过，各研究的局限或适用边界并不一致（{boundaries or '原文未明确说明'}），"
+                    f"因此写作时应比较其研究条件，而非把不同场景的结果直接等同。{citations}"
+                )
+                advice = "先写共同研究主题，再按方法、结论与适用边界比较，不按论文顺序逐篇复述。"
+            syntheses.append({
+                "id": f"S{index}",
+                "theme": theme_name,
+                "paper_ids": paper_ids,
+                "paragraph": compact_text(paragraph, 2400),
+                "comparison_dimensions": {
+                    "research_questions": questions,
+                    "methods": methods,
+                    "findings": findings,
+                    "boundaries": boundaries,
+                },
+                "writing_advice": advice,
+            })
+        return {"name": self.name, "syntheses": syntheses}
+
+    @staticmethod
+    def _dimension(rows: List[Dict[str, Any]], key: str) -> str:
+        values = []
+        for row in rows:
+            value = compact_text(row.get(key), 420)
+            if _skill_text_is_usable(value):
+                values.append(f"{row.get('paper_id', '')}{value}")
+        return "；".join(values[:4])
+
+
+class SectionArgumentStructureSkill:
+    name = "章节论证结构 Skill"
+
+    def run(
+        self,
+        outline: Dict[str, Any],
+        research: Dict[str, Any],
+        claim_evidence: Dict[str, Any],
+        syntheses: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        plans = []
+        all_cards = claim_evidence.get("cards", [])
+        materials = research.get("section_materials", {})
+        topic = outline.get("topic", "该研究主题")
+        for section in outline.get("sections", []):
+            source_ids = [
+                item.get("paper_id", "") for item in materials.get(section, [])
+                if item.get("paper_id")
+            ]
+            if not source_ids:
+                source_ids = [paper_id for item in syntheses for paper_id in item.get("paper_ids", [])]
+            source_ids = list(dict.fromkeys(source_ids))[:6]
+            evidence_cards = [
+                card for card in all_cards
+                if card.get("paper_id") in source_ids and card.get("verification_status") != "待核验"
+            ][:5]
+            related_syntheses = [
+                item.get("id", "") for item in syntheses
+                if set(item.get("paper_ids", [])) & set(source_ids)
+            ][:2]
+            kind = self._kind(section)
+            plans.append({
+                "section": section,
+                "goal": self._goal(kind, topic),
+                "core_claim": self._core_claim(kind, topic, research),
+                "writing_steps": self._steps(kind),
+                "evidence_order": [
+                    {
+                        "paper_id": card["paper_id"],
+                        "claim": card["claim"],
+                        "source_status": card["source_status"],
+                    }
+                    for card in evidence_cards
+                ],
+                "synthesis_ids": related_syntheses,
+                "transition": self._transition(kind),
+            })
+        return {"name": self.name, "plans": plans}
+
+    @staticmethod
+    def _kind(section: str) -> str:
+        if any(word in section for word in ("背景", "问题")):
+            return "background"
+        if any(word in section for word in ("分类", "进展", "现状")):
+            return "classification"
+        if any(word in section for word in ("方法", "结论", "比较")):
+            return "comparison"
+        if any(word in section for word in ("不足", "空白", "缺口", "局限")):
+            return "gap"
+        return "summary"
+
+    @staticmethod
+    def _goal(kind: str, topic: str) -> str:
+        goals = {
+            "background": f"界定{topic}的写作问题与综述范围，不提前做超出证据的结论。",
+            "classification": "按研究主题或研究路径组织材料，形成分类而不是论文清单。",
+            "comparison": "在相同维度下比较研究问题、方法、结论和适用边界。",
+            "gap": "从已提取的局限和比较差异中推出可验证的研究不足。",
+            "summary": "归纳已获得的证据，并限定后续研究可以回应的问题。",
+        }
+        return goals[kind]
+
+    @staticmethod
+    def _core_claim(kind: str, topic: str, research: Dict[str, Any]) -> str:
+        theme_names = "、".join(theme.get("name", "") for theme in research.get("themes", [])[:3] if theme.get("name"))
+        claims = {
+            "background": f"围绕{topic}的现有材料需要先按研究对象与问题范围界定。",
+            "classification": f"现有研究可围绕{theme_names or '不同研究主题'}形成分类，并在同类研究内比较。",
+            "comparison": "不同文献的结论必须结合其方法、数据和研究场景解释，不能脱离条件直接比较。",
+            "gap": "研究空白应来自已有文献的局限、对象差异或证据不足，而不是泛化描述。",
+            "summary": f"基于当前文献，可归纳{topic}的已有进展与仍待验证的边界。",
+        }
+        return claims[kind]
+
+    @staticmethod
+    def _steps(kind: str) -> List[str]:
+        steps = {
+            "background": ["交代问题范围", "引用与研究问题直接相关的文献", "说明本节将如何进入主题分类"],
+            "classification": ["先给出分类标准", "用综合段落呈现每一类研究", "比较类别间的研究对象或路径差异"],
+            "comparison": ["限定可比较的文献集合", "依次比较方法、结论和边界", "明确不能直接比较的原因"],
+            "gap": ["回扣已提取的论文局限", "说明差异或证据不足", "提出边界明确、可验证的后续方向"],
+            "summary": ["回收前文的分类与比较", "归纳有证据支持的结论", "过渡到后续研究或写作章节"],
+        }
+        return steps[kind]
+
+    @staticmethod
+    def _transition(kind: str) -> str:
+        transitions = {
+            "background": "在明确问题范围后，下文将按研究路径整合相关文献。",
+            "classification": "在完成主题分类后，还需要比较不同研究的证据条件与结论差异。",
+            "comparison": "上述差异进一步说明，研究不足需要从具体证据边界中提出。",
+            "gap": "这些不足为后续研究的问题界定和方法选择提供了依据。",
+            "summary": "以上结论仅基于当前纳入文献，仍需结合新增证据持续核验。",
+        }
+        return transitions[kind]
+
+
+class LogicCoherenceReviewSkill:
+    name = "逻辑与衔接评审 Skill"
+
+    def run(
+        self,
+        article: str,
+        research: Dict[str, Any],
+        section_plans: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        valid_ids = {paper.ref_id for paper in research.get("papers", [])}
+        main_text = article.split("## 参考文献", 1)[0]
+        sections = list(re.finditer(r"(?m)^##\s+\d+\.\s+(.+?)\s*$", main_text))
+        issues: List[Dict[str, str]] = []
+        seen_sentences = set()
+        reported_duplicate_sentences = set()
+        total_citations = set(re.findall(r"\[(R\d+)\]", main_text))
+        invalid_ids = sorted(total_citations - valid_ids)
+        if invalid_ids:
+            issues.append({
+                "level": "高", "section": "全文", "issue": f"存在无效来源编号：{', '.join(invalid_ids)}。",
+                "suggestion": "仅保留已纳入论文的来源编号，并重新绑定对应证据。",
+            })
+        link_words = ("因此", "然而", "同时", "此外", "相比", "在此基础上", "进一步", "由此", "不过")
+        strong_patterns = ("普遍证明", "完全证明", "所有研究", "必然", "显著提升", "唯一")
+        for index, match in enumerate(sections):
+            section = match.group(1).strip()
+            end = sections[index + 1].start() if index + 1 < len(sections) else len(main_text)
+            content = main_text[match.end():end].strip()
+            citations = set(re.findall(r"\[(R\d+)\]", content)) & valid_ids
+            if len(re.sub(r"\s+", "", content)) < 80:
+                issues.append({
+                    "level": "中", "section": section, "issue": "章节正文过短，尚未形成完整论证。",
+                    "suggestion": "补充中心论点、至少一条来源证据和章节小结。",
+                })
+            if not citations:
+                issues.append({
+                    "level": "高", "section": section, "issue": "章节没有有效论文来源标记。",
+                    "suggestion": "为关键判断补充论点-证据卡片中的论文编号。",
+                })
+            if any(pattern in content for pattern in strong_patterns):
+                issues.append({
+                    "level": "中", "section": section, "issue": "出现范围过大的强结论表述。",
+                    "suggestion": "改为限定样本、方法和场景的表述，并保留直接证据来源。",
+                })
+            # A transition can be implicit when adjacent sections share the
+            # same research terms. Do not penalise every section merely for
+            # not beginning with a fixed connector word.
+            previous_content = ""
+            if index > 0:
+                previous_match = sections[index - 1]
+                previous_end = match.start()
+                previous_content = main_text[previous_match.end():previous_end].strip()
+            term_pattern = r"[\u4e00-\u9fff]{2,6}|[A-Za-z]{4,}"
+            common_terms = {"研究", "文献", "论文", "方法", "结论", "结果", "内容", "现有", "主要", "相关", "分析"}
+            previous_terms = {
+                term for term in re.findall(term_pattern, previous_content)
+                if term not in common_terms
+            }
+            current_terms = {
+                term for term in re.findall(term_pattern, content[:500])
+                if term not in common_terms
+            }
+            implicit_transition = len(previous_terms & current_terms) >= 1
+            if index > 0 and content and not any(word in content[:260] for word in link_words) and not implicit_transition:
+                issues.append({
+                    "level": "低", "section": section, "issue": "章节开头缺少与前文的显式衔接。",
+                    "suggestion": "可使用“在完成分类后”“基于上述比较”等过渡句连接前文。",
+                })
+            for sentence in _split_sentences(content):
+                normalized = re.sub(r"\[R\d+\]|\s+|[，。；、,.]", "", sentence)
+                if len(normalized) >= 30 and normalized in seen_sentences and normalized not in reported_duplicate_sentences:
+                    issues.append({
+                        "level": "中", "section": section, "issue": "与前文存在重复表达。",
+                        "suggestion": "保留一次陈述，并将重复部分改为方法差异、适用边界或新的证据。",
+                    })
+                    reported_duplicate_sentences.add(normalized)
+                seen_sentences.add(normalized)
+        # The same type of problem can be detected repeatedly in one section
+        # (especially duplicate sentences). Count it once so the score reflects
+        # issue severity, not the number of repeated detections.
+        unique_issues: List[Dict[str, str]] = []
+        seen_issue_keys = set()
+        for issue in issues:
+            issue_key = (issue.get("level", ""), issue.get("section", ""), issue.get("issue", ""))
+            if issue_key not in seen_issue_keys:
+                unique_issues.append(issue)
+                seen_issue_keys.add(issue_key)
+        issues = unique_issues
+
+        high_count = sum(item["level"] == "高" for item in issues)
+        medium_count = sum(item["level"] == "中" for item in issues)
+        low_count = sum(item["level"] == "低" for item in issues)
+        penalty = high_count * 2.5 + medium_count * 0.8 + low_count * 0.3
+        # Keep the score interpretable on a 0-10 scale. A long draft should not
+        # receive zero merely because one detector reported many similar issues.
+        score = round(max(0.5, 10 - min(penalty, 9.5)), 1)
+        strengths = []
+        if sections and all(re.findall(r"\[(R\d+)\]", main_text[match.end():(sections[index + 1].start() if index + 1 < len(sections) else len(main_text))]) for index, match in enumerate(sections)):
+            strengths.append("每个已生成章节均保留了来源编号。")
+        if not invalid_ids:
+            strengths.append("未发现无效论文编号。")
+        if section_plans:
+            strengths.append(f"已为 {len(section_plans)} 个章节生成论证结构，可据此逐节修改。")
+        return {
+            "name": self.name,
+            "score": score,
+            "verdict": (
+                "需要优先修改" if high_count
+                else ("建议修改后再使用" if score < 6 else "可作为初稿继续完善")
+            ),
+            "issues": issues[:16],
+            "strengths": strengths,
+            "section_count": len(sections),
+            "valid_citations": sorted(total_citations & valid_ids),
+            "issue_counts": {"高": high_count, "中": medium_count, "低": low_count},
+            "score_basis": "同一章节同类问题只计一次；总扣分上限为9.5分。",
+        }
+
+
+class WritingSkillSuite:
+    def __init__(self) -> None:
+        self.claim_evidence = ClaimEvidenceBindingSkill()
+        self.cross_paper = CrossPaperSynthesisSkill()
+        self.section_structure = SectionArgumentStructureSkill()
+        self.logic_review = LogicCoherenceReviewSkill()
+
+    def prepare(self, outline: Dict[str, Any], research: Dict[str, Any]) -> Dict[str, Any]:
+        claim_evidence = self.claim_evidence.run(research.get("structured_papers", []))
+        cross_paper = self.cross_paper.run(research.get("themes", []), research.get("comparisons", []))
+        section_structure = self.section_structure.run(
+            outline, research, claim_evidence, cross_paper.get("syntheses", [])
+        )
+        return {
+            "catalog": WRITING_SKILL_CATALOG,
+            "claim_evidence": claim_evidence,
+            "cross_paper_synthesis": cross_paper,
+            "section_argument_structure": section_structure,
+        }
+
+    def review_after_draft(
+        self, article: str, research: Dict[str, Any], writing_skills: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return self.logic_review.run(
+            article,
+            research,
+            writing_skills.get("section_argument_structure", {}).get("plans", []),
+        )
+
+
 class WriterAgent:
     name = "策划 Agent"
 
@@ -1306,6 +1955,7 @@ class ResearcherAgent:
 
     def __init__(self, repository: Optional[OpenAlexRepository] = None) -> None:
         self.repository = repository or OpenAlexRepository()
+        self.structuring_skill = LiteratureStructuringSkill()
 
     def research(
         self,
@@ -1328,6 +1978,7 @@ class ResearcherAgent:
             selected = [Paper(**paper.to_dict()) for paper in DEMO_PAPERS[:max_papers]]
             source_mode = (source_mode + "，" if source_mode else "") + "内置示例"
         selected = self._renumber(selected[:max(1, min(int(max_papers), 20))])
+        structured_papers = self.structuring_skill.extract_all(selected)
         has_uploaded_papers = any(paper.source.startswith("导入") for paper in selected)
         # Uploaded papers are analysed through the grounded parser first. This
         # protects the visible matrix and draft from an unrelated LLM fallback.
@@ -1336,9 +1987,13 @@ class ResearcherAgent:
             integrated = self._rule_integrate(topic, sections, selected)
         integrated.update({
             "papers": selected,
+            "structured_papers": structured_papers,
             "paper_count": len(selected),
             "source_mode": source_mode,
             "content_analysis_coverage": round(sum(1 for paper in selected if paper.abstract and paper.full_text) / len(selected), 2) if selected else 0,
+            "structured_field_coverage": round(
+                sum(item["field_coverage"] for item in structured_papers) / len(structured_papers), 2
+            ) if structured_papers else 0,
         })
         return integrated
 
@@ -1518,24 +2173,49 @@ class ResearcherAgent:
 class EditorAgent:
     name = "写作 Agent"
 
-    def write(self, outline: Dict[str, Any], research: Dict[str, Any]) -> str:
+    def write(
+        self,
+        outline: Dict[str, Any],
+        research: Dict[str, Any],
+        writing_skills: Optional[Dict[str, Any]] = None,
+    ) -> str:
         topic = outline.get("topic", "研究主题")
         sections = outline.get("sections", [])
         materials = research.get("section_materials", {})
         papers = {paper.ref_id: paper for paper in research.get("papers", [])}
         grounded_upload = any(paper.source.startswith("导入") for paper in papers.values())
+        writing_skills = writing_skills or {}
+        plans = {
+            item.get("section", ""): item
+            for item in writing_skills.get("section_argument_structure", {}).get("plans", [])
+        }
+        syntheses = writing_skills.get("cross_paper_synthesis", {}).get("syntheses", [])
 
         def make_section(section: str) -> Tuple[str, str]:
             items = materials.get(section, [])
+            plan = plans.get(section, {})
+            related_syntheses = [
+                item for item in syntheses
+                if item.get("id") in plan.get("synthesis_ids", [])
+            ]
             context = "\n\n".join(
                 f"[{item.get('paper_id')}] {papers[item.get('paper_id')].title}\n观点: {item.get('claim')}\n依据: {item.get('evidence')}"
                 for item in items if item.get("paper_id") in papers
             ) or "本节暂无直接匹配文献，请明确标注证据不足。"
+            structure_context = (
+                f"章节目标：{plan.get('goal', '')}\n"
+                f"中心论点：{plan.get('core_claim', '')}\n"
+                f"写作步骤：{'；'.join(plan.get('writing_steps', []))}\n"
+                f"过渡句：{plan.get('transition', '')}\n"
+                f"跨文献综合素材：{' '.join(item.get('paragraph', '') for item in related_syntheses)}"
+            )
             prompt = f"""
 请围绕「{topic}」撰写文献综述初稿章节「{section}」。
 只能使用以下来源，不得编造论文事实；进行跨文献比较和归纳，而不是逐篇复述。
 所有来源标记必须使用 [R1] 这样的格式，且只使用给定编号；素材不足时写明“需要补充文献证据”。
 不要输出章节标题，只输出正文。
+
+{structure_context}
 
 {context}
 """
@@ -1543,7 +2223,7 @@ class EditorAgent:
             if generated.strip():
                 generated = re.sub(r"^\s*#{1,6}\s+[^\n]+\n", "", generated.strip(), count=1)
                 return section, generated
-            return section, self._fallback_section(section, items, papers)
+            return section, self._fallback_section(section, items, papers, plan, related_syntheses)
 
         contents: Dict[str, str] = {}
         if sections:
@@ -1567,19 +2247,32 @@ class EditorAgent:
         return "\n".join(parts)
 
     @staticmethod
-    def _fallback_section(section: str, items: List[Dict[str, Any]], papers: Dict[str, Paper]) -> str:
-        if not items:
+    def _fallback_section(
+        section: str,
+        items: List[Dict[str, Any]],
+        papers: Dict[str, Paper],
+        plan: Optional[Dict[str, Any]] = None,
+        syntheses: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        plan = plan or {}
+        syntheses = syntheses or []
+        if not items and not syntheses:
             return f"本节围绕“{section}”展开，但当前文献集合中缺少直接证据，需要补充文献后再完成论述。"
-        lines = [f"本节依据上传文献中可追溯的摘要与正文信息，对“{section}”进行整合。"]
-        for item in items[:4]:
-            paper = papers.get(item.get("paper_id"))
-            if paper:
-                claim = item.get("claim") or paper.abstract or paper.title
-                lines.append(f"{claim} [{paper.ref_id}]")
-        if len(items) > 1:
+        lines = [plan.get("core_claim") or f"本节依据上传文献中可追溯的摘要与正文信息，对“{section}”进行整合。"]
+        if syntheses:
+            lines.extend(item.get("paragraph", "") for item in syntheses[:2] if item.get("paragraph"))
+        else:
+            for item in items[:4]:
+                paper = papers.get(item.get("paper_id"))
+                if paper:
+                    claim = item.get("claim") or paper.abstract or paper.title
+                    lines.append(f"{claim} [{paper.ref_id}]")
+        if len(items) > 1 and not syntheses:
             cited = [papers[item.get("paper_id")] for item in items if item.get("paper_id") in papers]
             titles = "；".join(f"{paper.ref_id}《{paper.title}》" for paper in cited[:3])
             lines.append(f"横向比较可见，{titles}的研究对象与方法并不相同，结论只能在各自的样本、数据和场景范围内理解；后续应围绕可比对象、共同指标和外部案例补充验证。")
+        if plan.get("transition"):
+            lines.append(plan["transition"])
         return "\n\n".join(lines)
 
 
@@ -1657,6 +2350,7 @@ class MultiAgentOrchestrator:
         self.researcher = ResearcherAgent()
         self.editor = EditorAgent()
         self.critic = CriticAgent()
+        self.writing_skills = WritingSkillSuite()
 
     def run(
         self,
@@ -1693,8 +2387,12 @@ class MultiAgentOrchestrator:
             use_online=use_online,
             max_papers=max_papers,
         )
-        article = self.editor.write(outline, research)
+        writing_skills = self.writing_skills.prepare(outline, research)
+        article = self.editor.write(outline, research, writing_skills)
         review = self.critic.review(article, outline, research)
+        writing_skills["logic_coherence_review"] = self.writing_skills.review_after_draft(
+            article, research, writing_skills
+        )
         return {
             "topic": effective_topic,
             "outline": outline,
@@ -1703,6 +2401,7 @@ class MultiAgentOrchestrator:
             "materials": research.get("section_materials", {}),
             "article": article,
             "review": review,
+            "writing_skills": writing_skills,
             "execution_summary": {
                 "agents_used": 4,
                 "total_steps": 4,
@@ -1712,6 +2411,8 @@ class MultiAgentOrchestrator:
                 "quality_score": review.get("overall", 0),
                 "citation_coverage": review.get("citation_coverage", 0),
                 "content_analysis_coverage": research.get("content_analysis_coverage", review.get("content_analysis_coverage", 0)),
+                "writing_skill_count": len(writing_skills.get("catalog", [])),
+                "logic_review_score": writing_skills.get("logic_coherence_review", {}).get("score", 0),
                 "suggestions": review.get("suggestions", []),
             },
         }
@@ -1757,7 +2458,67 @@ def generate_report(result: Dict[str, Any]) -> str:
     lines.extend(["", "## 文献来源", "", "| 编号 | 论文 | 作者 | 年份 | 来源 |", "| --- | --- | --- | --- | --- |"])
     for paper in result.get("papers", []):
         lines.append(f"| {paper.ref_id} | {_table(paper.title)} | {_table(', '.join(paper.authors[:3]) or '未知')} | {paper.year or '未知'} | {_table(paper.source)} |")
-    lines.extend(["", "## 主题整合", ""])
+    lines.extend(["", "## 文献结构化提取", ""])
+    for item in research.get("structured_papers", []):
+        lines.extend([f"### [{item.get('paper_id', '')}] {item.get('title', '未命名论文')}", ""])
+        metadata = item.get("metadata", {})
+        lines.append(
+            f"作者：{_table(', '.join(metadata.get('authors', [])) or '未知')}；"
+            f"年份：{metadata.get('year') or '未知'}；DOI：{_table(metadata.get('doi') or '未识别')}；"
+            f"字段覆盖率：{item.get('field_coverage', 0):.0%}"
+        )
+        lines.append("")
+        fields = item.get("fields", {})
+        sources = item.get("field_sources", {})
+        for key, label in STRUCTURED_FIELD_LABELS.items():
+            lines.append(f"- **{label}**（{sources.get(key, '未提取')}）：{fields.get(key, '原文未明确说明。')}")
+        lines.append("")
+    writing_skills = result.get("writing_skills", {})
+    lines.extend(["## 写作 Skill 工作台", ""])
+    for skill in writing_skills.get("catalog", WRITING_SKILL_CATALOG):
+        lines.extend([
+            f"### {skill.get('name', '未命名 Skill')}",
+            f"- 作用：{skill.get('purpose', '')}",
+            f"- 输入：{skill.get('input', '')}",
+            f"- 输出：{skill.get('output', '')}",
+            "",
+        ])
+    binding = writing_skills.get("claim_evidence", {})
+    lines.extend([
+        "### 论点-证据绑定结果",
+        f"- 论点卡片：{len(binding.get('cards', []))} 张",
+        f"- 已支持：{binding.get('supported_count', 0)} 张",
+        f"- 证据覆盖率：{binding.get('coverage', 0):.0%}",
+        "",
+    ])
+    lines.extend(["### 跨文献综合写作结果", ""])
+    for item in writing_skills.get("cross_paper_synthesis", {}).get("syntheses", []):
+        lines.extend([
+            f"**{item.get('id', '')}｜{item.get('theme', '相关研究')}**（来源：{', '.join(item.get('paper_ids', []))}）",
+            item.get("paragraph", ""),
+            f"写作建议：{item.get('writing_advice', '')}",
+            "",
+        ])
+    lines.extend(["### 章节论证结构", ""])
+    for plan in writing_skills.get("section_argument_structure", {}).get("plans", []):
+        lines.extend([
+            f"#### {plan.get('section', '未命名章节')}",
+            f"- 章节目标：{plan.get('goal', '')}",
+            f"- 中心论点：{plan.get('core_claim', '')}",
+            f"- 写作步骤：{'；'.join(plan.get('writing_steps', []))}",
+            f"- 过渡句：{plan.get('transition', '')}",
+            "",
+        ])
+    logic = writing_skills.get("logic_coherence_review", {})
+    lines.extend([
+        "### 逻辑与衔接评审",
+        f"- 评审分：{logic.get('score', 0)}/10",
+        f"- 结论：{logic.get('verdict', '待评审')}",
+    ])
+    for issue in logic.get("issues", []):
+        lines.append(f"- [{issue.get('level', '')}] {issue.get('section', '')}：{issue.get('issue', '')} 建议：{issue.get('suggestion', '')}")
+    lines.append("")
+    lines.extend(["## 主题整合", ""])
     for theme in research.get("themes", []):
         lines.extend([f"### {theme.get('name', '未命名主题')}", "", f"{theme.get('summary', '')} 来源：{', '.join(theme.get('paper_ids', []))}", ""])
     lines.extend(["## 文献比较矩阵", "", "| 来源 | 研究问题 | 方法 | 主要结论 | 局限 |", "| --- | --- | --- | --- | --- |"])
