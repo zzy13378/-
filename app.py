@@ -39,6 +39,8 @@ try:
         load_papers_from_bytes,
         STRUCTURED_FIELD_LABELS,
         WRITING_SKILL_CATALOG,
+        WRITING_STYLE_PACKS,
+        LLMError,
     )
     HAS_WRITER = True
 except ImportError as e:
@@ -61,6 +63,235 @@ st.set_page_config(
 def clean_ansi(text: str) -> str:
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return ansi_escape.sub('', text)
+
+FIELD_STATUS_OPTIONS = {"确认": "confirmed", "修改": "edited", "排除": "excluded"}
+CARD_STATUS_OPTIONS = {"采用": "adopted", "排除": "excluded"}
+OUTPUT_TYPE_OPTIONS = {"大纲": "outline", "结构化要点": "keypoints", "论文初稿": "draft"}
+OUTLINE_FOCUS_FIELDS = ("method", "finding", "limitation")
+
+
+def render_llm_error(error):
+    """模型调用失败时给出明确结果，而不是静默降级成模板写作。"""
+    st.error(
+        f"模型调用失败：已重试 {error.get('attempts', 0)} 次仍未成功，本次没有生成内容。"
+        "系统不会退回模板写作，避免产出看似完整但不可用的初稿。"
+    )
+    cols = st.columns(3)
+    cols[0].metric("模型", error.get("model", "-") or "-")
+    cols[1].metric("重试次数", error.get("attempts", 0))
+    cols[2].metric("接口状态", "不可用")
+    st.markdown(f"**失败原因：** `{error.get('last_error', '未知')}`")
+    st.caption(f"接口地址：{error.get('base_url', '-')}")
+    st.markdown(
+        "排查建议：确认本地模型代理已启动（默认 `http://127.0.0.1:15721/v1`）；"
+        "确认 `LLM_MODEL` 为 `deepseek-v4-flash`；推理模型需要较大的 token 预算，"
+        "如仍超时可在 `.env` 中调大 `P4_LLM_TIMEOUT`，或调整 `P4_LLM_ATTEMPTS`。"
+    )
+
+
+def render_confirmation_stage(prepared):
+    """人工确认节点：输出类型、结构化字段与论点证据。"""
+    research = prepared.get("research", {})
+    writing_skills = prepared.get("writing_skills", {})
+    summary = prepared.get("execution_summary", {})
+    outline = prepared.get("outline", {})
+    structured_papers = research.get("structured_papers", [])
+    cards = writing_skills.get("claim_evidence", {}).get("cards", [])
+    default_sections = outline.get("sections", [])
+
+    st.markdown("---")
+    st.subheader("🧑‍⚖️ 人工确认节点")
+    st.caption(
+        "流程在生成内容前暂停。输出类型决定生成粒度：大纲只产出章节结构与证据顺序，不调用写作模型；"
+        "结构化要点额外给出每章可引用证据；论文初稿才生成正文并执行引用覆盖与衔接评审。"
+    )
+
+    top_cols = st.columns([1.0, 1.0, 2.4])
+    with top_cols[0]:
+        output_label = st.radio(
+            "输出类型", list(OUTPUT_TYPE_OPTIONS.keys()), index=2, key="p4_output_type"
+        )
+    with top_cols[1]:
+        structure_source = st.radio(
+            "结构来源", ["默认模板", "自定义章节"], index=0, key="p4_structure_source"
+        )
+    custom_sections = []
+    with top_cols[2]:
+        if structure_source == "自定义章节":
+            raw_sections = st.text_area(
+                "章节列表（每行一个章节）",
+                value="\n".join(default_sections),
+                key="p4_custom_sections",
+                height=150,
+            )
+            custom_sections = [line.strip() for line in raw_sections.splitlines() if line.strip()]
+            st.caption(f"当前 {len(custom_sections)} 个章节，生成时会按这些章节重新匹配文献素材。")
+        else:
+            st.caption("默认章节结构：" + "、".join(default_sections))
+
+    style_cols = st.columns([1.2, 1.2, 2.0])
+    with style_cols[0]:
+        style_label = st.selectbox("写作风格", list(WRITING_STYLE_PACKS.keys()), index=0, key="p4_style")
+    with style_cols[1]:
+        enable_rewrite = st.checkbox("启用评审后重写", value=True, key="p4_rewrite")
+    with style_cols[2]:
+        st.caption("写作风格控制段落长度、句式与禁用表达；重写会针对评审标记的章节重新生成一次。")
+
+    generated = prepared.get("generated_topic") or {}
+    if generated.get("topic"):
+        st.info(f"系统根据文献自动生成的研究主题：**{generated['topic']}**（来源：{generated.get('source', '模型生成')}）")
+        if generated.get("research_question"):
+            st.caption(f"研究问题：{generated['research_question']}")
+    elif prepared.get("topic"):
+        st.caption(f"当前研究主题：{prepared.get('topic')}")
+
+    focus_fields = OUTLINE_FOCUS_FIELDS if output_label == "大纲" else tuple(STRUCTURED_FIELD_LABELS.keys())
+    if output_label == "大纲":
+        st.caption(
+            "当前选择“大纲”：章节结构不依赖九字段逐条确认，因此只需确认研究方法、核心结论和研究局限，其余字段默认通过。"
+        )
+
+    alignment = research.get("topic_alignment") or {}
+    gap_ratio = research.get("evidence_gap_ratio", 0.0)
+    if alignment.get("ratio", 1.0) < 0.4:
+        st.error(
+            f"文献与主题相关性不足：{alignment.get('aligned', 0)}/{alignment.get('total', 0)} 篇文献包含主题关键词"
+            f"（{alignment.get('ratio', 0):.0%}）。当前材料无法支撑这个主题的综述，继续生成只会得到大量"
+            "“证据不足”的表述。建议换用与主题一致的文献，或把研究主题改成与已有文献匹配的方向。"
+        )
+    if gap_ratio > 0.5:
+        st.warning(
+            f"文献可用信息不足：结构化字段中有 {gap_ratio:.0%} 标记为待核验或未明确，"
+            "通常意味着只拿到摘要、没有正文。建议上传 PDF 全文后重新提取。"
+        )
+
+    search_failures = research.get("search_failures") or []
+    if search_failures:
+        st.warning("部分数据源未返回结果：" + "；".join(search_failures))
+    search_queries = research.get("search_queries") or []
+    if search_queries:
+        with st.expander("本次使用的检索式", expanded=False):
+            for query in search_queries:
+                st.write("- " + str(query))
+            st.caption("中文检索式用于中文核心期刊定向检索，英文检索式用于 OpenAlex / Crossref / arXiv。")
+
+    info_cols = st.columns(4)
+    info_cols[0].metric("待确认论文", f"{summary.get('paper_count', 0)} 篇")
+    info_cols[1].metric("待确认字段", f"{len(structured_papers) * len(focus_fields)} 个")
+    info_cols[2].metric("待确认论点卡片", f"{len(cards)} 张")
+    info_cols[3].metric("字段覆盖率", f"{summary.get('structured_field_coverage', 0):.0%}")
+
+    field_decisions = {}
+    card_decisions = {}
+
+    tab_field, tab_card = st.tabs(["① 结构化字段确认", "② 论点证据确认"])
+
+    with tab_field:
+        st.caption("默认状态为“确认”。内容不准确时改为“修改”并填写正确内容；原文无法支持该字段时改为“排除”。")
+        if not structured_papers:
+            st.info("暂无结构化字段可确认。")
+        for item in structured_papers:
+            paper_id = item.get("paper_id", "")
+            fields = item.get("fields", {})
+            sources = item.get("field_sources", {})
+            with st.expander(
+                f"[{paper_id}] {item.get('title', '未命名论文')}｜字段 {item.get('field_count', 0)}/9",
+                expanded=False,
+            ):
+                for field_key in focus_fields:
+                    field_label = STRUCTURED_FIELD_LABELS[field_key]
+                    st.markdown(f"**{field_label}** ｜ 来源：{sources.get(field_key, '未提取')}")
+                    st.write(fields.get(field_key, ""))
+                    choice = st.radio(
+                        f"{field_label} 处理方式",
+                        list(FIELD_STATUS_OPTIONS.keys()),
+                        index=0,
+                        horizontal=True,
+                        key=f"p4_field_choice_{paper_id}_{field_key}",
+                        label_visibility="collapsed",
+                    )
+                    value = ""
+                    if choice == "修改":
+                        value = st.text_area(
+                            f"{field_label} 修改后的内容",
+                            value=fields.get(field_key, ""),
+                            key=f"p4_field_value_{paper_id}_{field_key}",
+                            height=90,
+                        )
+                    field_decisions.setdefault(paper_id, {})[field_key] = {
+                        "status": FIELD_STATUS_OPTIONS[choice],
+                        "value": value,
+                    }
+
+    with tab_card:
+        st.caption("默认状态为“采用”。证据不足以支撑该论点时改为“排除”，排除的卡片不会进入章节证据顺序。")
+        if not cards:
+            st.info("暂无论点证据卡片可确认。")
+        current_paper = None
+        for card in cards:
+            paper_id = card.get("paper_id", "")
+            if paper_id != current_paper:
+                current_paper = paper_id
+                st.markdown(f"**[{paper_id}] {card.get('title', '未命名论文')}**")
+            row = st.columns([5, 1])
+            with row[0]:
+                st.markdown(f"{card.get('field_label', '')}：{card.get('claim', '')}")
+                st.caption(
+                    f"来源状态：{card.get('source_status', '')} ｜ 核验状态：{card.get('verification_status', '')} ｜ "
+                    f"{card.get('writing_guidance', '')}"
+                )
+            with row[1]:
+                choice = st.radio(
+                    "处理方式",
+                    list(CARD_STATUS_OPTIONS.keys()),
+                    index=0,
+                    key=f"p4_card_choice_{paper_id}_{card.get('field', '')}",
+                    label_visibility="collapsed",
+                )
+            card_decisions[f"{paper_id}|{card.get('field', '')}"] = CARD_STATUS_OPTIONS[choice]
+
+    edited_fields = sum(
+        1 for paper in field_decisions.values() for decision in paper.values() if decision["status"] == "edited"
+    )
+    excluded_fields = sum(
+        1 for paper in field_decisions.values() for decision in paper.values() if decision["status"] == "excluded"
+    )
+    excluded_cards = sum(1 for value in card_decisions.values() if value == "excluded")
+    st.caption(
+        f"当前选择：输出 {output_label} ｜ 结构来源 {structure_source} ｜ 修改字段 {edited_fields} 个 ｜ "
+        f"排除字段 {excluded_fields} 个 ｜ 排除论点证据 {excluded_cards} 张。"
+    )
+
+    action_cols = st.columns([1, 1, 3])
+    with action_cols[0]:
+        if st.button(f"✅ 生成{output_label}", type="primary", key="p4_compose"):
+            with st.spinner(f"正在按确认结果生成{output_label}…"):
+                try:
+                    composed = P4Orchestrator().compose(
+                        prepared,
+                        field_decisions=field_decisions,
+                        card_decisions=card_decisions,
+                        output_type=OUTPUT_TYPE_OPTIONS[output_label],
+                        custom_sections=custom_sections or None,
+                        style=style_label,
+                        enable_rewrite=enable_rewrite,
+                    )
+                    st.session_state["p4_result"] = composed
+                    st.session_state.pop("p4_error", None)
+                    st.rerun()
+                except LLMError as exc:
+                    st.session_state["p4_error"] = exc.to_dict()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"生成失败：{exc}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    with action_cols[1]:
+        if st.button("↺ 重新开始", key="p4_reset"):
+            st.session_state.pop("p4_prepared", None)
+            st.session_state.pop("p4_result", None)
+            st.rerun()
+
 
 # ============================================================
 # P4 单项目入口
@@ -97,16 +328,30 @@ if project == "p4":
         with st.form("p4_literature_form"):
             col1, col2 = st.columns(2)
             with col1:
-                topic = st.text_input("研究主题", "大语言模型智能体在科研场景中的应用")
+                topic = st.text_input(
+                    "研究主题 / 检索关键词（可留空）",
+                    "",
+                    help="留空时系统会根据上传的文献自动生成研究主题与题目。若不上传文献，请在这里填写检索关键词。",
+                )
                 research_question = st.text_area(
-                    "研究问题",
-                    "现有研究主要采用哪些方法解决科研场景中的知识获取与任务协作问题？不同方法的效果、局限和研究空白是什么？",
+                    "研究问题（可留空）",
+                    "",
                     height=110,
+                    help="留空时系统会根据文献自动生成。",
                 )
             with col2:
                 template = st.selectbox("初稿结构", ["文献综述", "研究背景"])
                 max_papers = st.number_input("最多整合论文数", min_value=1, max_value=20, value=8, step=1)
-                use_online = st.checkbox("接入 OpenAlex 真实论文数据库检索", value=True)
+                use_online = st.checkbox("接入真实论文数据库检索", value=True)
+                sources = st.multiselect(
+                    "检索数据源",
+                    ["中文核心期刊", "OpenAlex", "Crossref", "arXiv", "DOAJ"],
+                    default=["中文核心期刊", "OpenAlex", "Crossref"],
+                    help="中文核心期刊：按国内核心刊名定向检索（生态学报、中国科学、情报学报、计算机研究与发展等）；"
+                    "OpenAlex 与 Crossref 覆盖国际期刊并带引用量；arXiv 覆盖 AI 前沿预印本；DOAJ 为开放获取期刊。",
+                )
+                year_range = st.selectbox("发表时间范围", ["近 5 年", "近 3 年", "近 10 年", "不限"], index=0)
+                sort_label = st.selectbox("排序方式", ["按质量（引用密度＋期刊＋时效）", "按发表时间"], index=0)
                 uploaded_files = st.file_uploader(
                     "导入已收集论文（PDF / Word / TXT / Markdown / JSON / CSV，可多选）",
                     type=["pdf", "docx", "txt", "md", "json", "csv"],
@@ -115,8 +360,15 @@ if project == "p4":
                 )
             submitted = st.form_submit_button("🚀 开始文献整合")
 
+        if submitted and not uploaded_files and not str(topic).strip():
+            st.error("请至少上传一篇文献；如果没有现成文献，请在上方填写研究主题或检索关键词，系统会据此在线检索。")
+            submitted = False
+
         if submitted:
-            with st.spinner("正在执行：策划 → 文献调研 → 结构化写作 → 来源评审…"):
+            st.session_state.pop("p4_result", None)
+            st.session_state.pop("p4_prepared", None)
+            st.session_state.pop("p4_error", None)
+            with st.spinner("正在执行：策划 → 文献调研 → 结构化提取 → 论点证据绑定…"):
                 try:
                     imported_papers = None
                     parse_errors = []
@@ -143,16 +395,22 @@ if project == "p4":
                             imported_papers = None
                             st.warning("上传文件中没有读取到有效论文，将继续使用在线检索或内置示例。")
 
-                    orchestrator = P4Orchestrator()
-                    result = orchestrator.run(
+                    prepared = P4Orchestrator().prepare(
                         topic=topic,
                         research_question=research_question,
                         template=template,
                         papers=imported_papers,
                         use_online=use_online,
                         max_papers=int(max_papers),
+                        sources=sources,
+                        years={"近 5 年": 5, "近 3 年": 3, "近 10 年": 10, "不限": None}[year_range],
+                        sort="quality" if sort_label.startswith("按质量") else "recent",
                     )
-                    st.session_state["p4_result"] = result
+                    st.session_state["p4_prepared"] = prepared
+                    st.session_state.pop("p4_error", None)
+                except LLMError as exc:
+                    st.session_state.pop("p4_prepared", None)
+                    st.session_state["p4_error"] = exc.to_dict()
                 except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as e:
                     st.error(f"论文文件解析失败：{e}")
                 except Exception as e:
@@ -160,22 +418,105 @@ if project == "p4":
                     import traceback
                     st.code(traceback.format_exc())
 
+        llm_error = st.session_state.get("p4_error")
+        if llm_error:
+            render_llm_error(llm_error)
+
+        prepared = st.session_state.get("p4_prepared")
+        if prepared:
+            render_confirmation_stage(prepared)
+
         result = st.session_state.get("p4_result")
         if result:
             summary = result.get("execution_summary", {})
             review = result.get("review", {})
             research = result.get("research", {})
-            st.success("✅ 文献整合完成")
-            metric_cols = st.columns(5)
+            confirmation = result.get("confirmation", {}) or {}
+            output_label_result = summary.get("output_label", "论文初稿")
+            review_applicable = summary.get("review_applicable", True)
+            st.success(f"✅ {output_label_result}已生成（已应用人工确认结果）")
+            if confirmation:
+                st.caption(
+                    f"输出 {confirmation.get('output_label', output_label_result)}"
+                    f"（{confirmation.get('structure_source', '默认模板')}）；"
+                    f"字段确认 {confirmation.get('confirmed_fields', 0)} 个、修改 {confirmation.get('edited_fields', 0)} 个、"
+                    f"排除 {confirmation.get('excluded_fields', 0)} 个；论点证据采用 {confirmation.get('adopted_cards', 0)} 张、"
+                    f"排除 {confirmation.get('excluded_cards', 0)} 张。"
+                )
+                if confirmation.get("excluded_evidence") or confirmation.get("notes"):
+                    with st.expander("人工确认记录", expanded=False):
+                        if confirmation.get("excluded_evidence"):
+                            st.write("已排除字段：" + "、".join(confirmation["excluded_evidence"]))
+                        for note in confirmation.get("notes", []):
+                            st.write(note)
+            metric_cols = st.columns(6) if review_applicable else st.columns(5)
             metric_cols[0].metric("整合论文", f"{summary.get('paper_count', 0)} 篇")
             metric_cols[1].metric("主题归纳", f"{len(research.get('themes', []))} 个")
             metric_cols[2].metric("研究空白", f"{len(research.get('gaps', []))} 条")
-            metric_cols[3].metric("来源覆盖率", f"{summary.get('citation_coverage', 0):.0%}")
-            metric_cols[4].metric("评审得分", f"{summary.get('quality_score', 0)}/10")
+            if review_applicable:
+                metric_cols[3].metric("来源覆盖率", f"{summary.get('citation_coverage', 0):.0%}")
+                metric_cols[4].metric("评审得分", f"{summary.get('quality_score', 0)}/10")
+                metric_cols[5].metric("写作质量分", f"{summary.get('writing_quality_score', 0)}/10")
+            else:
+                metric_cols[3].metric("输出类型", output_label_result)
+                metric_cols[4].metric(
+                    "已绑定证据章节",
+                    f"{summary.get('evidence_bound_sections', 0)}/{summary.get('section_count', 0)}",
+                )
+            model_mode = "真实 API" if P4_LLM.available else "规则降级模式"
             st.caption(
-                f"论文来源：{summary.get('source_mode', '未知')}；模型模式：{'真实 API' if P4_LLM.available else '规则降级模式'}；"
+                f"论文来源：{summary.get('source_mode', '未知')}；模型模式：{model_mode}；"
                 f"内容分析覆盖率：{summary.get('content_analysis_coverage', research.get('content_analysis_coverage', 0)):.0%}"
             )
+            alignment = research.get("topic_alignment") or {}
+            gap_ratio = research.get("evidence_gap_ratio", 0.0)
+            review_flags = review.get("quality_flags", []) if isinstance(review, dict) else []
+            for flag in review_flags:
+                if "相关性不足" in flag or "可用信息不足" in flag:
+                    st.error(flag)
+            if alignment.get("ratio", 1.0) < 0.4:
+                st.caption(
+                    f"主题相关性：{alignment.get('aligned', 0)}/{alignment.get('total', 0)} 篇命中主题关键词"
+                    f"（{alignment.get('ratio', 0):.0%}）"
+                )
+            if not P4_LLM.available:
+                reason = getattr(P4_LLM, "last_error", "") or "未配置模型服务"
+                st.warning(
+                    f"当前未调用写作模型，正文由规则模板生成，语言质量会明显低于模型写作。原因：{reason}。"
+                    f"当前模型地址：{getattr(P4_LLM, 'base_url', '未设置')}，模型：{getattr(P4_LLM, 'model', '未设置')}。"
+                    "请在 .env 中配置可用的 OPENAI_API_KEY 与 OPENAI_BASE_URL，或启动本地模型代理后重新生成。"
+                )
+
+            quality = result.get("writing_quality", {}) or {}
+            citation = result.get("citation_check", {}) or {}
+            if quality or citation:
+                with st.expander("✍️ 写作质量与引用校验", expanded=False):
+                    if quality:
+                        q_cols = st.columns(4)
+                        q_cols[0].metric("主题句覆盖率", f"{quality.get('topic_coverage', 0):.0%}")
+                        q_cols[1].metric("分析句占比", f"{quality.get('analysis_ratio', 0):.0%}")
+                        q_cols[2].metric("重复句比例", f"{quality.get('duplicate_ratio', 0):.0%}")
+                        q_cols[3].metric("段落数", f"{quality.get('paragraph_count', 0)}")
+                        st.caption(f"评分依据：{quality.get('score_basis', '')}")
+                        if quality.get("moves_used"):
+                            st.write("已使用的论证动作：" + "、".join(quality["moves_used"]))
+                        st.write(f"连接词多样性：{quality.get('connective_diversity', 0):.0%}")
+                        if quality.get("banned_hits"):
+                            st.warning("命中禁用表达：" + "、".join(quality["banned_hits"]))
+                        if quality.get("ai_flavor_hits"):
+                            st.warning("命中 AI 味表达：" + "、".join(quality["ai_flavor_hits"]))
+                    if citation:
+                        st.write(
+                            f"引用校验：有效引用 {citation.get('cited_count', 0)}/{citation.get('valid_count', 0)}；"
+                            f"无效编号 {len(citation.get('invalid_ids', []))} 个；待核验句 {len(citation.get('unsupported_sentences', []))} 句。"
+                        )
+                        for item in citation.get("unsupported_sentences", [])[:5]:
+                            st.warning(f"证据重合度 {item.get('best_overlap')}：{item.get('sentence')}")
+                    for entry in result.get("rewrite_log", []) or []:
+                        st.info(
+                            f"已重写章节：{'、'.join(entry.get('sections', []))}；"
+                            f"评审分 {entry.get('score_before')} → {entry.get('score_after')}。"
+                        )
 
             with st.expander("📚 已纳入的论文来源", expanded=True):
                 papers = result.get("papers", [])
@@ -187,6 +528,8 @@ if project == "p4":
                             "作者": ", ".join(paper.authors[:6]) or "未知",
                             "年份": paper.year or "未知",
                             "来源": paper.source,
+                            "期刊/会议": getattr(paper, "venue", "") or "未标注",
+                            "被引": getattr(paper, "citation_count", 0) or 0,
                             "解析置信度": paper.metadata_confidence,
                         }
                         for paper in papers
@@ -207,7 +550,7 @@ if project == "p4":
                                 st.caption(f"其余 {len(warnings) - 12} 条提示与上述内容相同或属于同类书目信息提醒。")
 
             tab_structured, tab_skills, tab_theme, tab_matrix, tab_gap, tab_article, tab_review = st.tabs(
-                ["文献结构化提取", "写作 Skill 工作台", "主题整合", "文献比较矩阵", "研究空白", "论文初稿", "评审与迭代"]
+                ["文献结构化提取", "写作 Skill 工作台", "主题整合", "文献比较矩阵", "研究空白", output_label_result, "评审与迭代"]
             )
             with tab_structured:
                 structured_papers = research.get("structured_papers", [])
@@ -240,7 +583,7 @@ if project == "p4":
                     st.info("暂无结构化提取结果，请先上传论文并开始文献整合。")
             with tab_skills:
                 writing_skills = result.get("writing_skills", {})
-                st.markdown("### 本次流程使用的 4 个写作 Skill")
+                st.markdown(f"### 本次流程使用的 {len(writing_skills.get('catalog', WRITING_SKILL_CATALOG))} 个写作 Skill")
                 st.caption("Skill 不是单独的聊天按钮，而是嵌入文献整理与论文初稿流程的具体能力模块。")
                 for skill in writing_skills.get("catalog", WRITING_SKILL_CATALOG):
                     with st.expander(f"{skill.get('name', '未命名 Skill')} · {skill.get('purpose', '')}", expanded=True):
@@ -293,8 +636,24 @@ if project == "p4":
                         if evidence_order:
                             st.caption("建议证据顺序：" + " → ".join(item.get("paper_id", "") for item in evidence_order))
 
+                planning = writing_skills.get("paragraph_planning", {})
+                st.markdown("### 4. 论证动作编排结果")
+                planning_sections = planning.get("sections", {})
+                if planning_sections:
+                    for section_name, payload in planning_sections.items():
+                        with st.expander(section_name, expanded=False):
+                            for plan in payload.get("paragraphs", []):
+                                st.markdown(f"**{plan.get('id', '')}｜{plan.get('move', '')}**")
+                                st.write(plan.get("topic_sentence", ""))
+                                st.caption(
+                                    "证据：" + ("、".join(plan.get("evidence_ids", [])) or "未绑定")
+                                    + (f"｜衔接：{plan.get('transition')}" if plan.get("transition") else "")
+                                )
+                else:
+                    st.info("暂无段落规划结果。")
+
                 logic = writing_skills.get("logic_coherence_review", {})
-                st.markdown("### 4. 逻辑与衔接评审")
+                st.markdown("### 5. 逻辑与衔接评审")
                 st.metric("逻辑评审分", f"{logic.get('score', 0)}/10")
                 st.write(f"**评审结论：** {logic.get('verdict', '待评审')}")
                 for strength in logic.get("strengths", []):
@@ -347,16 +706,21 @@ if project == "p4":
             with tab_article:
                 st.markdown(result.get("article", ""))
             with tab_review:
-                score_rows = [{"评审维度": key, "得分": value} for key, value in review.get("scores", {}).items()]
-                if score_rows:
-                    st.dataframe(pd.DataFrame(score_rows), width="stretch", hide_index=True)
-                st.write(f"**评审结论：** {review.get('verdict', '需要修改')}")
-                if review.get("quality_flags"):
-                    st.warning("；".join(review["quality_flags"]))
-                for index, suggestion in enumerate(review.get("suggestions", []), 1):
-                    st.markdown(f"**迭代建议 {index}：** {suggestion}")
-                if review.get("missing_sources"):
-                    st.warning(f"正文尚未覆盖来源：{', '.join(review['missing_sources'])}")
+                if not review_applicable:
+                    st.info(review.get("reason", "当前输出类型未执行全文评审。"))
+                    for suggestion in review.get("suggestions", []):
+                        st.markdown(f"**建议：** {suggestion}")
+                else:
+                    score_rows = [{"评审维度": key, "得分": value} for key, value in review.get("scores", {}).items()]
+                    if score_rows:
+                        st.dataframe(pd.DataFrame(score_rows), width="stretch", hide_index=True)
+                    st.write(f"**评审结论：** {review.get('verdict', '需要修改')}")
+                    if review.get("quality_flags"):
+                        st.warning("；".join(review["quality_flags"]))
+                    for index, suggestion in enumerate(review.get("suggestions", []), 1):
+                        st.markdown(f"**迭代建议 {index}：** {suggestion}")
+                    if review.get("missing_sources"):
+                        st.warning(f"正文尚未覆盖来源：{', '.join(review['missing_sources'])}")
 
             st.download_button(
                 "📥 下载完整 Markdown 报告",
