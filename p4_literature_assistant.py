@@ -45,6 +45,13 @@ try:
 except ImportError:
     PdfReader = None
 
+# 内置高质量文献库：命中足够时跳过在线检索，减少 OpenAlex 调用。
+try:
+    from local_corpus import CorpusRecord, LocalCorpus
+except ImportError:  # 语料库模块缺失时退化为纯在线检索
+    CorpusRecord = None
+    LocalCorpus = None
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
@@ -184,6 +191,56 @@ def paper_from_record(record: Dict[str, Any], ref_id: str, source: str = "本地
         doi=doi,
         url=str(record.get("url") or record.get("landing_page_url") or location.get("landing_page_url") or ""),
         source=source,
+    )
+
+
+_LOCAL_CORPUS = None
+
+
+def get_local_corpus():
+    """惰性加载内置文献库，只构造一次检索索引。"""
+
+    global _LOCAL_CORPUS
+    if _LOCAL_CORPUS is None and LocalCorpus is not None:
+        try:
+            _LOCAL_CORPUS = LocalCorpus()
+        except Exception:
+            _LOCAL_CORPUS = None
+    return _LOCAL_CORPUS
+
+
+def local_corpus_stats() -> Dict[str, Any]:
+    corpus = get_local_corpus()
+    if corpus is None:
+        return {"total": 0}
+    return corpus.stats()
+
+
+def _paper_from_corpus(record: Any, ref_id: str = "R0") -> "Paper":
+    """把内置语料记录转成统一的 Paper 对象。"""
+
+    # 有全文就用全文，没有就退回摘要。证据级别直接写进 text_quality，
+    # 后续字段抽取和评审都会据此区分“全文级”与“摘要级”证据。
+    try:
+        evidence = record.evidence_text()
+        level = record.evidence_level()
+    except AttributeError:
+        evidence = getattr(record, "abstract", "")
+        level = "摘要" if evidence else "仅书目信息"
+    return Paper(
+        ref_id=ref_id,
+        title=record.title,
+        authors=list(record.authors),
+        year=record.year,
+        abstract=record.abstract,
+        full_text=evidence,
+        doi=record.doi,
+        url=record.url,
+        source="内置文献库",
+        venue=record.venue,
+        citation_count=record.cited_by_count,
+        metadata_confidence="中",
+        text_quality=level,
     )
 
 
@@ -1861,7 +1918,34 @@ class LiteratureSearchService:
         collected: List[Paper] = []
         failures: List[str] = []
         pool_cap = max(limit, 6) * 4
+
+        # 先查内置高质量文献库。本地命中足够就不再联网，避免重复消耗 OpenAlex 额度。
+        local_only = os.environ.get("P4_LOCAL_CORPUS_ONLY", "false").lower() in {"1", "true", "yes"}
+        skip_online = False
+        corpus = get_local_corpus()
+        if corpus is not None and len(corpus) > 0:
+            local_hits: List[Paper] = []
+            local_seen: set = set()
+            for query in queries[:3]:
+                for record in corpus.search(query, limit=max(limit, 6) * 2, from_year=from_year, sort=sort):
+                    key = (record.doi or record.title).casefold()
+                    if key in local_seen:
+                        continue
+                    local_seen.add(key)
+                    local_hits.append(_paper_from_corpus(record))
+                if len(local_hits) >= pool_cap:
+                    break
+            if local_hits:
+                collected.extend(local_hits)
+                if local_only or len(local_hits) >= limit:
+                    skip_online = True
+                    failures.append(
+                        f"内置文献库命中 {len(local_hits)} 篇（库内共 {len(corpus)} 篇），已跳过在线检索"
+                    )
+
         for name, repository in self.repositories:
+            if skip_online:
+                break
             seen: set = set()
             # 中文核心期刊在国际库里以英文题录收录，优先用英文检索式召回
             query_order = (queries[1:] + queries[:1]) if name == "中文核心期刊" else queries
@@ -1893,10 +1977,18 @@ class LiteratureSearchService:
                 english_hits = sum(1 for terms in term_groups for term in terms if term in text.lower())
                 if chinese_hits >= 2 or (chinese_hits >= 1 and english_hits >= 1) or english_hits >= 3:
                     journal_papers.append(paper)
+            # 内置文献库的结果已经按主题锚点做过相关性判断，不再做二次严格过滤，
+            # 否则会把本地命中的结果砍掉，反而要回退到联网检索。
+            local_papers = [paper for paper in deduped if paper.source == "内置文献库"]
             others = filter_by_relevance(
-                [paper for paper in deduped if paper.source != "中文核心期刊"], term_groups
+                [
+                    paper
+                    for paper in deduped
+                    if paper.source not in {"中文核心期刊", "内置文献库"}
+                ],
+                term_groups,
             )
-            matched = journal_papers + others
+            matched = journal_papers + local_papers + others
             if len(matched) >= max(3, limit // 2):
                 deduped = matched
 
@@ -3910,7 +4002,10 @@ class EditorAgent:
 
 写作质量要求：
 - 必须写出具体内容，优先使用证据中的样本量、模型名称、研究区域、指标名称；
-- 引用标注要克制：同一来源在同一段落内只标注一次，不要每句都加 [R1]；连续陈述同一来源时可合并为一句再标注；
+- 引用标注规则：凡是转述文献事实、数据、结论的句子，句末必须标注来源编号，例如 [R1]；
+  属于自己的解释、评价与过渡句可以不标编号，但不能引入新的文献事实；
+- 同一个来源在连续陈述时不必每句都标，但该组证据句至少要在结尾标注一次；
+- 每个段落必须至少出现一个来源编号，除非本段明确说明是“证据不足”；
 - 段落控制在 4-7 句，不要写成只有一句的长句堆叠；
 - 不要把论证动作的名称写进正文，例如禁止出现“指出这些研究的共同点”这类任务说明；
 - 禁止使用“围绕……提供了可以直接比较的材料”“这些研究的样本与数据条件并不相同”这类模板句；
@@ -3994,9 +4089,29 @@ class CriticAgent:
     def review(self, article: str, outline: Dict[str, Any], research: Dict[str, Any]) -> Dict[str, Any]:
         valid_ids = {paper.ref_id for paper in research.get("papers", [])}
         papers = research.get("papers", [])
-        cited_ids = set(re.findall(r"\[(R\d+)\]", article)) & valid_ids
-        coverage = round(len(cited_ids) / len(valid_ids), 2) if valid_ids else 0
+        # 只统计正文引用。参考文献列表里每篇都带编号，如果连它一起算，覆盖率会永远是 100%。
+        body = article.split("## 参考文献", 1)[0]
+        cited_ids = set(re.findall(r"\[(R\d+)\]", body)) & valid_ids
+        # 仅有书目信息的论文没有可用证据，按设计不参与写作，不应计入覆盖率分母。
+        structured_map = {
+            str(item.get("paper_id")): item for item in research.get("structured_papers", [])
+        }
+        writable_ids = {
+            paper_id
+            for paper_id in valid_ids
+            if (structured_map.get(paper_id) or {}).get("field_count", 9) >= 2
+            and (structured_map.get(paper_id) or {}).get("metadata", {}).get("text_quality") != "仅书目信息"
+        } or valid_ids
+        non_writable = sorted(valid_ids - writable_ids)
+        unused_sources = sorted(writable_ids - cited_ids)
+        coverage = round(len(cited_ids & writable_ids) / len(writable_ids), 2) if writable_ids else 0
         quality_flags: List[str] = []
+        if unused_sources:
+            quality_flags.append(f"正文未引用这些已有证据的文献：{', '.join(unused_sources)}")
+        if non_writable:
+            quality_flags.append(
+                f"{', '.join(non_writable)} 仅有书目信息，没有摘要或正文，未参与写作，不计入来源覆盖率"
+            )
         for paper in papers:
             if paper.title in {"研究论文", "未命名论文"} or re.search(r"第\s*\d+\s*卷|Vol\.?\s*\d+|文章编号|Journal of", paper.title, flags=re.I):
                 quality_flags.append(f"{paper.ref_id} 标题疑似期刊页眉或栏目名")
@@ -4072,7 +4187,9 @@ class CriticAgent:
         result["word_count"] = count_chinese_words(article)
         result["citation_coverage"] = coverage
         result["cited_sources"] = sorted(cited_ids)
-        result["missing_sources"] = sorted(valid_ids - cited_ids)
+        result["missing_sources"] = unused_sources
+        result["unused_sources"] = unused_sources
+        result["non_writable_sources"] = non_writable
         result["quality_flags"] = quality_flags
         result["content_analysis_coverage"] = round(sum(1 for item in comparisons if item.get("method") and item.get("finding")) / len(papers), 2) if papers else 0
         return result

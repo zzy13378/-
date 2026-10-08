@@ -300,9 +300,33 @@ st.sidebar.title("📚 科研文献整合助手")
 st.sidebar.markdown("---")
 st.sidebar.caption("面向科研新手的多文献整合与结构化写作辅助")
 st.sidebar.caption("支持 PDF、Word、TXT、Markdown、JSON、CSV")
+try:
+    _manifest_path = PROJECT_DIR / "data" / "local_corpus_manifest.json"
+    if _manifest_path.exists():
+        _manifest = json.loads(_manifest_path.read_text(encoding="utf-8"))
+        _corpus_file = PROJECT_DIR / "data" / "local_corpus.jsonl"
+        _lines = 0
+        if _corpus_file.exists():
+            with _corpus_file.open("r", encoding="utf-8") as _handle:
+                _lines = sum(1 for _line in _handle if _line.strip())
+        st.sidebar.caption(f"📚 内置文献库：{_lines} 篇（已采集 {len(_manifest.get('done_venues') or [])} 个期刊）")
+except Exception:
+    pass
 st.sidebar.markdown("---")
 st.sidebar.caption(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 st.sidebar.caption("P4 Literature Assistant · v1.0")
+
+# 页面选择：文献整合主流程，或真实模式的评测与审查
+page = st.sidebar.radio("功能", ["文献整合", "评测与审查"], key="p4_page")
+if page == "评测与审查":
+    try:
+        from evaluation.app import render as render_evaluation
+    except ImportError as exc:
+        st.error(f"评测模块加载失败：{exc}")
+        st.stop()
+    render_evaluation()
+    st.stop()
+
 project = "p4"
 
 # ============================================================
@@ -343,6 +367,12 @@ if project == "p4":
                 template = st.selectbox("初稿结构", ["文献综述", "研究背景"])
                 max_papers = st.number_input("最多整合论文数", min_value=1, max_value=20, value=8, step=1)
                 use_online = st.checkbox("接入真实论文数据库检索", value=True)
+                local_only = st.checkbox(
+                    "仅用内置文献库（不联网）",
+                    value=False,
+                    help="内置语料库已收录高质量中英文期刊论文，命中足够时系统会自动跳过联网检索，"
+                    "减少 OpenAlex 调用；勾选后完全离线检索。",
+                )
                 sources = st.multiselect(
                     "检索数据源",
                     ["中文核心期刊", "OpenAlex", "Crossref", "arXiv", "DOAJ"],
@@ -395,6 +425,7 @@ if project == "p4":
                             imported_papers = None
                             st.warning("上传文件中没有读取到有效论文，将继续使用在线检索或内置示例。")
 
+                    os.environ["P4_LOCAL_CORPUS_ONLY"] = "true" if local_only else "false"
                     prepared = P4Orchestrator().prepare(
                         topic=topic,
                         research_question=research_question,
@@ -720,7 +751,12 @@ if project == "p4":
                     for index, suggestion in enumerate(review.get("suggestions", []), 1):
                         st.markdown(f"**迭代建议 {index}：** {suggestion}")
                     if review.get("missing_sources"):
-                        st.warning(f"正文尚未覆盖来源：{', '.join(review['missing_sources'])}")
+                        st.warning(f"正文尚未引用这些已有证据的文献：{', '.join(review['missing_sources'])}")
+                    if review.get("non_writable_sources"):
+                        st.info(
+                            f"以下文献仅有书目信息、没有摘要或正文，未参与写作，也不计入来源覆盖率："
+                            f"{', '.join(review['non_writable_sources'])}"
+                        )
 
             st.download_button(
                 "📥 下载完整 Markdown 报告",

@@ -14,3 +14,12 @@ vendor/
 *.mp4
 *.wav
 *.log
+# 生成数据与运行产物：语料库本体保留（克隆后即可离线检索），
+# 全文缓存、备份和历史报告不入库。
+data/fulltext/
+data/*backup*
+data/*_backup_*
+reports/
+pdf_inbox/
+.env.bak
+.env.local

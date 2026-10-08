@@ -1,0 +1,314 @@
+{
+ "decided_at": "20261006174421",
+ "rule": "h_index >= 10 or cited_by_count >= 1000",
+ "keep": [
+  {
+   "id": "S4210224179",
+   "display_name": "Journal of Software",
+   "alternate_titles": [
+    "Journal of Software",
+    "软件学报",
+    "Ruanjian Xuebao"
+   ],
+   "works_count": 2168,
+   "cited_by_count": 15240,
+   "h_index": 46,
+   "two_year_mean_citedness": 0,
+   "country": "CN",
+   "type": "journal",
+   "configured_name": "Journal of Software"
+  },
+  {
+   "id": "S4210240373",
+   "display_name": "Journal of Computer Research and Development",
+   "alternate_titles": [
+    "Computer Research and Development",
+    "Jisuanji Yanjiu yu Fazhan",
+    "计算机研究与发展"
+   ],
+   "works_count": 5739,
+   "cited_by_count": 14415,
+   "h_index": 35,
+   "two_year_mean_citedness": 0,
+   "country": "CN",
+   "type": "journal",
+   "configured_name": "Journal of Computer Research and Development"
+  },
+  {
+   "id": "S23425967",
+   "display_name": "Acta Automatica Sinica",
+   "alternate_titles": [
+    "自动化学报"
+   ],
+   "works_count": 3889,
+   "cited_by_count": 22245,
+   "h_index": 51,
+   "two_year_mean_citedness": 0,
+   "country": "NL",
+   "type": "journal",
+   "configured_name": "Acta Automatica Sinica"
+  },
+  {
+   "id": "S4210201508",
+   "display_name": "Scientia Sinica Informationis",
+   "alternate_titles": [
+    "Scientia Sinica."
+   ],
+   "works_count": 2621,
+   "cited_by_count": 6664,
+   "h_index": 27,
+   "two_year_mean_citedness": 0.54,
+   "country": "CN",
+   "type": "journal",
+   "configured_name": "Scientia Sinica Informationis"
+  },
+  {
+   "id": "S2764613313",
+   "display_name": "Shuju fenxi yu zhishi faxian",
+   "alternate_titles": [
+    "Data analysis and knowledge discovery",
+    "数据分析与知识发现"
+   ],
+   "works_count": 3103,
+   "cited_by_count": 1981,
+   "h_index": 13,
+   "two_year_mean_citedness": 0,
+   "country": "CN",
+   "type": "journal",
+   "configured_name": "Data Analysis and Knowledge Discovery"
+  },
+  {
+   "id": "S4394735489",
+   "display_name": "Acta Ecologica Sinica",
+   "alternate_titles": [
+    "生态学报",
+    "Shengtai Xuebao"
+   ],
+   "works_count": 1223,
+   "cited_by_count": 24840,
+   "h_index": 62,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Acta Ecologica Sinica"
+  },
+  {
+   "id": "S2764396693",
+   "display_name": "自然资源学报",
+   "alternate_titles": [
+    "Journal of Natural Resources",
+    "Ziranziyuan Xuebao"
+   ],
+   "works_count": 4079,
+   "cited_by_count": 20313,
+   "h_index": 37,
+   "two_year_mean_citedness": 1.33,
+   "country": "CN",
+   "type": "journal",
+   "configured_name": "Journal of Natural Resources"
+  },
+  {
+   "id": "S2948018973",
+   "display_name": "Shengtaixue zazhi",
+   "alternate_titles": [
+    "Journal of Ecology",
+    "生态学杂志"
+   ],
+   "works_count": 4795,
+   "cited_by_count": 9140,
+   "h_index": 21,
+   "two_year_mean_citedness": 0,
+   "country": "CN",
+   "type": "journal",
+   "configured_name": "Chinese Journal of Ecology"
+  },
+  {
+   "id": "S2764494154",
+   "display_name": "China Environmental Science",
+   "alternate_titles": [
+    "China Environmental Science",
+    "中国环境科学",
+    "Zhongguo Huanjing Kexue"
+   ],
+   "works_count": 3623,
+   "cited_by_count": 8824,
+   "h_index": 23,
+   "two_year_mean_citedness": 0,
+   "country": "CN",
+   "type": "journal",
+   "configured_name": "China Environmental Science"
+  },
+  {
+   "id": "S2764508881",
+   "display_name": "Zhongguo ruankexue",
+   "alternate_titles": [
+    "Soft Science Research",
+    "中国软科学"
+   ],
+   "works_count": 2574,
+   "cited_by_count": 2118,
+   "h_index": 13,
+   "two_year_mean_citedness": 0.14,
+   "country": "CN",
+   "type": "journal",
+   "configured_name": "China Soft Science"
+  }
+ ],
+ "drop": [
+  {
+   "id": "S4306558328",
+   "display_name": "计算机学报",
+   "alternate_titles": [],
+   "works_count": 224,
+   "cited_by_count": 2,
+   "h_index": 1,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Chinese Journal of Computers"
+  },
+  {
+   "id": "S4306546149",
+   "display_name": "图书情报工作",
+   "alternate_titles": [],
+   "works_count": 1532,
+   "cited_by_count": 59,
+   "h_index": 3,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Library and Information Service"
+  },
+  {
+   "id": "S4306541643",
+   "display_name": "中国图书馆学报",
+   "alternate_titles": [],
+   "works_count": 516,
+   "cited_by_count": 0,
+   "h_index": 0,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Journal of Library Science in China"
+  },
+  {
+   "id": "S4306513277",
+   "display_name": "Information Studies: Theory & Application",
+   "alternate_titles": [
+    "情报理论与实践"
+   ],
+   "works_count": 543,
+   "cited_by_count": 30,
+   "h_index": 2,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Information Studies: Theory & Application"
+  },
+  {
+   "id": "S4306548927",
+   "display_name": "心理学报",
+   "alternate_titles": [],
+   "works_count": 236,
+   "cited_by_count": 8,
+   "h_index": 2,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Acta Psychologica Sinica"
+  },
+  {
+   "id": "S4306546362",
+   "display_name": "地理学报",
+   "alternate_titles": [
+    "Acta Geographica Sinica",
+    "Dili Xuebao"
+   ],
+   "works_count": 433,
+   "cited_by_count": 272,
+   "h_index": 9,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Acta Geographica Sinica"
+  },
+  {
+   "id": "S4306548585",
+   "display_name": "应用生态学报",
+   "alternate_titles": [],
+   "works_count": 337,
+   "cited_by_count": 1,
+   "h_index": 1,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Chinese Journal of Applied Ecology"
+  },
+  {
+   "id": "S4306556525",
+   "display_name": "管理世界",
+   "alternate_titles": [
+    "Guanli Shijie"
+   ],
+   "works_count": 1047,
+   "cited_by_count": 5,
+   "h_index": 1,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Management World"
+  },
+  {
+   "id": "S4306556622",
+   "display_name": "系统工程理论与实践",
+   "alternate_titles": [],
+   "works_count": 411,
+   "cited_by_count": 0,
+   "h_index": 0,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Systems Engineering - Theory & Practice"
+  },
+  {
+   "id": "S4306556535",
+   "display_name": "管理科学学报",
+   "alternate_titles": [],
+   "works_count": 112,
+   "cited_by_count": 0,
+   "h_index": 0,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Journal of Management Sciences in China"
+  },
+  {
+   "id": "S4306542317",
+   "display_name": "中国远程教育",
+   "alternate_titles": [],
+   "works_count": 1813,
+   "cited_by_count": 1,
+   "h_index": 1,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Distance Education in China"
+  },
+  {
+   "id": "S4306549096",
+   "display_name": "情报学报",
+   "alternate_titles": [
+    "Qingbao Xuebao"
+   ],
+   "works_count": 241,
+   "cited_by_count": 0,
+   "h_index": 0,
+   "two_year_mean_citedness": 0,
+   "country": null,
+   "type": "journal",
+   "configured_name": "Journal of the China Society for Scientific and Technical Information"
+  }
+ ],
+ "corpus_before": 3712,
+ "corpus_after": 3635
+}
